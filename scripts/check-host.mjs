@@ -475,15 +475,17 @@ console.log("dsh-approval-mode: host contract");
   check(calls[0]?.system?.includes("untrusted data"), "tool input is explicitly treated as untrusted review data");
   const escalatedRequest = { ...escalation("s"), toolName: "bash", callId: "call-safe" };
   check((await ui.ask(escalatedRequest)).outcome === "allowed-once", "a sandbox escalation inside that approved tool call uses the same AI decision");
-  check((await ui.ask(escalatedRequest)).delegated, "the AI escalation grant is one-shot and cannot be reused");
-  check((await ui.ask(ordinary("s"))).delegated, "the lower-level approval waterfall remains ordinary if called independently");
+  const repeated = await ui.ask(escalatedRequest);
+  check(repeated.outcome === "rejected" && !repeated.delegated, "the AI escalation grant is one-shot and a repeated request is rejected without GUI approval");
+  const unreviewed = await ui.ask(ordinary("s"));
+  check(unreviewed.outcome === "rejected" && !unreviewed.delegated, "an unreviewed approval request in AI mode is rejected rather than delegated");
 
   decision = '{"decision":"deny","reason":"not safe"}';
   const denied = await ui.preExecute(exec, { kind: "allow" });
-  check(denied.kind === "ask", "an AI denial turns an otherwise allowed call into a user confirmation prompt");
+  check(denied.kind === "deny", "an AI denial directly rejects an otherwise allowed call");
   decision = "not-json";
   const malformed = await ui.preExecute(exec, { kind: "allow" });
-  check(malformed.kind === "ask", "malformed reviewer output fails closed to a user confirmation");
+  check(malformed.kind === "deny", "malformed reviewer output fails closed by rejecting the call");
 
   decision = '{"decision":"approve"}';
   const escalatedExec = {
@@ -503,7 +505,19 @@ console.log("dsh-approval-mode: host contract");
   const completedExec = { ...exec, callId: "call-completed" };
   await ui.preExecute(completedExec, { kind: "ask", reason: "tool needs confirmation" });
   ui.emit("tools/result", completedExec, { isError: false });
-  check((await ui.ask({ ...escalation("s"), toolName: "bash", callId: "call-completed" })).delegated, "tools/result clears the one-shot AI escalation grant");
+  const expiredGrant = await ui.ask({ ...escalation("s"), toolName: "bash", callId: "call-completed" });
+  check(expiredGrant.outcome === "rejected" && !expiredGrant.delegated, "tools/result clears the one-shot AI grant and unmatched escalation is denied");
+}
+{
+  const ui = boot({ generation: "forms", config: liveRef("llm-auto") });
+  const unavailable = await ui.preExecute({
+    callId: "missing-reviewer",
+    agent: { id: "s" },
+    name: "bash",
+    arguments: { command: "true" },
+    signal: new AbortController().signal
+  }, { kind: "ask" });
+  check(unavailable.kind === "deny", "a missing AI reviewer directly rejects instead of requesting human approval");
 }
 
 // 3a: a request whose Agent uses the OLDER shape reaches the same session.

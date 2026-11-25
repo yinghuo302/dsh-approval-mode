@@ -679,10 +679,9 @@ export function apply(ctx, config) {
       }
       return downstream;
     }
-    if (downstream?.kind === "ask") return downstream;
-    const why = review.decision === "deny" && review.reason ? `: ${review.reason}` : "";
-    console.log(`[dsh-approval-mode] AI review did not approve ${exec?.name ?? "(unknown tool)"}; handing it to the user`);
-    return { kind: "ask", reason: `AI approval requires your confirmation${why}` };
+    const why = review.decision === "deny" && review.reason ? `: ${review.reason}` : " (review unavailable or returned an invalid decision)";
+    console.log(`[dsh-approval-mode] AI review rejected ${exec?.name ?? "(unknown tool)"}; denying the call`);
+    return { kind: "deny", reason: `AI approval rejected this tool call${why}` };
   }, { prepend: true });
 
   /**
@@ -703,9 +702,13 @@ export function apply(ctx, config) {
       const mode = MODES.includes(stored) ? stored : readDefault();
       const tool = req && req.toolName ? req.toolName : "(unknown tool)";
       const at = sessionId ? ` @ ${sessionId}` : "";
-      if (mode === LLM_AUTO && isEscalationRequest(req) && consumeAiApproval(req, sessionId)) {
-        console.log(`[dsh-approval-mode] AI approved sandbox escalation for ${tool}${at}`);
-        return "allowed-once";
+      if (mode === LLM_AUTO) {
+        if (isEscalationRequest(req) && consumeAiApproval(req, sessionId)) {
+          console.log(`[dsh-approval-mode] AI approved sandbox escalation for ${tool}${at}`);
+          return "allowed-once";
+        }
+        console.log(`[dsh-approval-mode] AI approval missing or denied for ${tool}${at}; rejecting`);
+        return "rejected";
       }
       if (mode === BYPASS) {
         console.log(`[dsh-approval-mode] bypass: auto-approved ${tool}${at}`);

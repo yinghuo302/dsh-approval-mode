@@ -23,10 +23,10 @@ DSH 的审批系统（`@deepseek-ai/dsh-user-approval`）内置两种会话级�
 | --- | --- | --- |
 | `ask`（默认审批） | 走 DSH 原生审批（点击批准） | 弹窗，用户决定 |
 | `bypass-except-escalation`（工具免审） | 自动放行 | **弹窗，用户决定** |
-| `llm-auto`（AI审批） | `tools/pre-execute` 将工具描述、参数 Schema 与完整参数交给当前默认模型；只有规定的 JSON `approve` 结果放行，其他结果转人工 | 同样由模型评估，可批准或交还用户 |
+| `llm-auto`（AI审批） | `tools/pre-execute` 将工具描述、参数 Schema 与完整参数交给当前默认模型；只有规定的 JSON `approve` 结果放行，其他结果直接拒绝 | 仅当与已批准调用的 `callId` 匹配时放行，否则拒绝 |
 | `bypass`（绕过审批） | 自动放行 | 自动放行 |
 
-`llm-auto` 在 `tools/pre-execute` 审查实际工具名、描述、参数 Schema 与完整参数；模型不会收到主会话历史或审批模式设置。工具输入被视为不可信数据；模型服务缺失、超时、拒绝或输出不符合 JSON 决策协议时均退回人工审批。若已批准的工具执行内部发起沙箱提权，`approval/request` 通过相同 `callId` 消耗该次 AI 批准，`tools/result` 后即清除。
+`llm-auto` 在 `tools/pre-execute` 审查实际工具名、描述、参数 Schema 与完整参数；模型不会收到主会话历史或审批模式设置。工具输入被视为不可信数据；模型服务缺失、超时、拒绝或输出不符合 JSON 决策协议时均直接拒绝工具调用。若已批准的工具执行内部发起沙箱提权，`approval/request` 通过相同 `callId` 消耗该次 AI 批准，`tools/result` 后即清除；没有匹配审批记录的请求直接拒绝。
 
 「提权」指 `@deepseek-ai/dsh-sandbox` 的 `approveEscalation()`：受限调用被拒绝后，模型用 `sandbox_permissions` + `justification` 重试同一次调用，请求一次严格更宽的模式。它是唯一会**放宽**沙箱边界的审批，因此单独成一档。
 
@@ -48,11 +48,12 @@ DSH 的审批系统（`@deepseek-ai/dsh-user-approval`）内置两种会话级�
 │ │    settings 文档里的 sessions 映射                         │
 │ ├─ tools/pre-execute（prepend: true）                       │
 │ │    llm-auto -> 审查工具描述/Schema/完整参数              │
-│ │       仅 AI 批准转换下游 ask 为 allow；拒绝/失败转人工    │
+│ │       仅 AI 批准转换下游 ask 为 allow；拒绝/失败直接 deny │
 │ ├─ approval/request 应答器（prepend: true）                │
 │ │    bypass                    -> "allowed-once"           │
 │ │    bypass-except-escalation  -> 提权 next()，其余放行    │
-│ │    ask / llm-auto            -> next()                   │
+│ │    llm-auto -> 仅匹配已批准 callId 的提权放行，否则拒绝 │
+│ │    ask                       -> next()                   │
 │ ├─ 会话地址由 sessionIdOf 解析：0.2.0 的 agent.id /        │
 │ │    更早的 agent.session.id；无地址则使用默认值            │
 │ └─ webServer 控制路由 GET/POST /approval-mode（回环校验）  │
