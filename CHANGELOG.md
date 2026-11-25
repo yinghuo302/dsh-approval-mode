@@ -10,6 +10,16 @@
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-11-25
+
+### 修复
+
+- AI 审批识别 `plugin_manager` 在工具执行内部发起的权限申请：`list_plugins` 等只读操作现在也会先经 AI 判断并按同一 `callId` 完成一次性授权；不会因缺少 Bash `sandbox_permissions` 字段而直接拒绝。
+
+### 验证
+
+- Host 测试覆盖下游原本允许、但 `plugin_manager` 内部需要审批的读取操作能够进入 AI 审核并关联到后续审批请求。
+
 ## [0.3.8] - 2026-11-25
 
 ### 修复

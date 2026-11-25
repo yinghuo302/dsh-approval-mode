@@ -507,6 +507,19 @@ console.log("dsh-approval-mode: host contract");
   const repeatedFullAccess = await ui.ask(fullAccessApproval);
   check(repeatedFullAccess.outcome === "rejected" && !repeatedFullAccess.delegated, "the full-access grant is one-shot and not delegated to a human");
 
+  const listCall = {
+    ...exec,
+    callId: "call-plugin-list",
+    name: "plugin_manager",
+    schema: { description: "Every action requires danger-full-access permission or approval for this call.", parameters: { type: "object" } },
+    arguments: { action: "list_plugins", offset: 0, limit: 10 }
+  };
+  const beforeListReview = calls.length;
+  await ui.preExecute(listCall, { kind: "allow" });
+  check(calls.length === beforeListReview + 1, "a plugin_manager action with an internal approval is reviewed despite a downstream allow");
+  check(calls.at(-1)?.messages?.[0]?.content?.[0]?.text?.includes('"action":"list_plugins"'), "the AI reviewer sees the exact plugin manager action");
+  check((await ui.ask({ ...escalation("s"), toolName: "plugin_manager", callId: "call-plugin-list" })).outcome === "allowed-once", "the approved read-only plugin listing uses its linked internal approval");
+
   const completedExec = { ...exec, callId: "call-completed", arguments: { command: "true", sandbox_permissions: "danger-full-access", justification: "test" } };
   await ui.preExecute(completedExec, { kind: "allow" });
   ui.emit("tools/result", completedExec, { isError: false });
