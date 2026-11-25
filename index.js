@@ -7,12 +7,13 @@
  *   - The approval/request answerer is registered at the FRONT of the waterfall
  *     (`prepend: true`): bypass modes can settle a request without the GUI; ask
  *     mode delegates to DSH's ordinary click-to-approve flow.
- *   - Modes include `ask`, `llm-auto`, `bypass-except-escalation` and `bypass`.
- *     `llm-auto` reviews the complete tool call in `tools/pre-execute`, where
- *     the schema and arguments are available; a denial or review failure
- *     rejects the call. Decisions are recorded in a local, redacted history
- *     view. Mode changes remain plugin state and are never injected into the
- *     Agent's conversation.
+ *   - Modes include `ask`, both AI review variants, `bypass-except-escalation`
+ *     and `bypass`. The fail-closed AI mode denies review failures; the
+ *     fallback variant returns them to manual approval. Decisions are recorded
+ *     in a local, redacted history view. Mode changes remain plugin state and
+ *     are never injected into the Agent's conversation.
+ *   - A fresh Agent session is seeded with the last-used mode; resumed sessions
+ *     retain their stored choice. The configured default is the initial fallback.
  *   - The escalation carve-out mode auto-approves ordinary calls but hands a
  *     sandbox escalation — a one-shot widening that lets a file operation or
  *     command leave the workspace — back to the GUI answerer.
@@ -24,25 +25,21 @@
  *     same value lives in the legacy settings namespace (`approval-mode`),
  *     which this plugin still registers and reads when that service — i.e. one
  *     with `register` — is present.
- *   - Each SESSION's own mode is a second value, keyed by session id and kept
- *     in a small JSON file under the DSH home (`<home>/approval-mode/
- *     sessions.json`). It deliberately does NOT live in the settings service:
- *     the namespace that held it before 0.1.7 is gone, and on 0.1.7+ that
- *     service only edits a plugin's Config — per-session runtime state keyed by
- *     an open-ended id set does not belong in the profile patch. The file's
- *     first load carries over the `sessions` map an older install left in the
- *     namespace.
+ *   - Per-session modes and the last-used seed for new sessions live in a small
+ *     JSON file under the DSH home (`<home>/approval-mode/sessions.json`). They
+ *     deliberately do NOT live in the settings service: per-session runtime
+ *     state keyed by open-ended ids does not belong in the profile patch. The
+ *     store reads older v1/bare-map formats and migrates legacy `sessions` once.
  *   - The client half reads/writes both through the same small HTTP route
  *     (`GET/POST /approval-mode`) registered on the public webServer service.
  *     The route keeps the settings RPC surface out of the plugin: a
  *     compose-time control route keeps the mode read/write self-contained and
  *     survives both settings generations unchanged.
  * The client half (lib/client.js) renders two surfaces over these values: the
- * session picker next to the permission selector, which edits the current
- * session, and (on DSH <= 0.1.6) the plugin's card on the settings page
- * (设置 → 插件 → 插件配置), which edits the default. On 0.1.7+ the settings page
- * draws that card itself, from `Config.defaultMode`; the browser half adds
- * only the picker. See doc/design.md for the full design.
+ * session picker edits the current session and records the last-used seed for
+ * future fresh sessions; the settings card edits the initial/default mode. On
+ * 0.1.7+ the settings page draws that card from `Config.defaultMode`; the
+ * browser half adds only the picker. See doc/design.md for the full design.
  *
  * Dependency: `@deepseek-ai/schemastery` is the only host package this half
  * imports. Host Services are obtained from Cordis at runtime; no versioned
@@ -100,11 +97,14 @@ export const BYPASS = "bypass";
 /** Auto-approve every tool call except a sandbox escalation. */
 export const BYPASS_EXCEPT_ESCALATION = "bypass-except-escalation";
 
-/** Ask the configured LLM to decide each request; invalid or failed reviews defer to the user. */
+/** Ask the configured LLM to decide; rejection or failure denies the request. */
 export const LLM_AUTO = "llm-auto";
 
+/** Ask the LLM first, then hand denials and review failures to the user. */
+export const LLM_AUTO_FALLBACK = "llm-auto-fallback";
+
 /** Every approval mode this plugin can put a session in. */
-export const MODES = [ASK, BYPASS_EXCEPT_ESCALATION, LLM_AUTO, BYPASS];
+export const MODES = [ASK, BYPASS_EXCEPT_ESCALATION, LLM_AUTO, LLM_AUTO_FALLBACK, BYPASS];
 
 /** Mode every unresolved read falls back to. */
 export const DEFAULT_MODE = ASK;
@@ -162,7 +162,7 @@ export const SESSION_STORE_DIR = "approval-mode";
 export const SESSION_STORE_FILE = "sessions.json";
 
 /** Format version of the session store document. */
-export const SESSION_STORE_VERSION = 1;
+export const SESSION_STORE_VERSION = 2;
 
 /** Read-only HTTP route used by the local approval-history view. */
 export const AI_HISTORY_ROUTE_PATH = `${ROUTE_PATH}/history`;
@@ -255,7 +255,7 @@ export function sanitizeSessions(value) {
  * @param text - raw file contents.
  * @returns the session map, or null when the document is not a JSON object.
  */
-export function parseSessionStore(text) {
+export function parseSessionStoreDocument(text) {
   let parsed;
   try {
     parsed = JSON.parse(text);
@@ -263,12 +263,18 @@ export function parseSessionStore(text) {
     return null;
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  // Accept both the versioned envelope and a bare { sessionId: mode } map, so a
-  // hand-written file (and the legacy namespace value) read the same way.
-  const sessions = parsed.sessions !== null && typeof parsed.sessions === "object" && !Array.isArray(parsed.sessions)
-    ? parsed.sessions
-    : parsed;
-  return sanitizeSessions(sessions);
+  // Accept both the versioned envelope and a bare { sessionId: mode } map.
+  const hasEnvelope = parsed.sessions !== null && typeof parsed.sessions === "object" && !Array.isArray(parsed.sessions);
+  const sessions = hasEnvelope ? parsed.sessions : parsed;
+  return {
+    sessions: sanitizeSessions(sessions),
+    lastUsedMode: hasEnvelope && MODES.includes(parsed.lastUsedMode) ? parsed.lastUsedMode : undefined
+  };
+}
+
+/** Backward-compatible session-map parser used by older callers and tests. */
+export function parseSessionStore(text) {
+  return parseSessionStoreDocument(text)?.sessions ?? null;
 }
 
 /**
@@ -446,6 +452,7 @@ function createSessionModes(ctx, legacySeed) {
   let path = null;
   let loaded = false;
   let modes = {};
+  let lastUsedMode;
 
   function storePath() {
     if (path === null) path = sessionStorePath(ctx);
@@ -457,7 +464,12 @@ function createSessionModes(ctx, legacySeed) {
     const temporary = `${target}.${process.pid}.tmp`;
     try {
       mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(temporary, `${JSON.stringify({ version: SESSION_STORE_VERSION, sessions: modes }, null, 2)}\n`, "utf8");
+      const document = {
+        version: SESSION_STORE_VERSION,
+        sessions: modes,
+        ...(MODES.includes(lastUsedMode) ? { lastUsedMode } : {})
+      };
+      writeFileSync(temporary, `${JSON.stringify(document, null, 2)}\n`, "utf8");
       renameSync(temporary, target);
       return true;
     } catch (err) {
@@ -485,12 +497,13 @@ function createSessionModes(ctx, legacySeed) {
       }
     }
     if (text !== null) {
-      const parsed = parseSessionStore(text);
+      const parsed = parseSessionStoreDocument(text);
       if (parsed === null) {
         console.error(`[dsh-approval-mode] session store is not a mode map, starting empty: ${target}`);
         return;
       }
-      modes = parsed;
+      modes = parsed.sessions;
+      lastUsedMode = parsed.lastUsedMode;
       return;
     }
     // First run with no store of our own: an install that predates DSH 0.1.7
@@ -507,20 +520,40 @@ function createSessionModes(ctx, legacySeed) {
       load();
       return typeof sessionId === "string" ? modes[sessionId] : undefined;
     },
+    /** Most recently used choice, applied only to newly started sessions. */
+    lastUsedMode() {
+      load();
+      return MODES.includes(lastUsedMode) ? lastUsedMode : undefined;
+    },
     /** A detached copy of the whole map (for snapshots and the route). */
     entries() {
       load();
       return { ...modes };
     },
-    /** Store one session's mode; false when it could not be persisted. */
-    set(sessionId, mode) {
+    /** Persist the last-used seed; pass undefined to clear it. */
+    setLastUsedMode(mode) {
       load();
-      if (modes[sessionId] === mode) return true;
+      if (mode !== undefined && !MODES.includes(mode)) return false;
+      if (lastUsedMode === mode) return true;
+      const previous = lastUsedMode;
+      lastUsedMode = mode;
+      if (persist()) return true;
+      lastUsedMode = previous;
+      return false;
+    },
+    /** Store one session's mode and, by default, remember it for new sessions. */
+    set(sessionId, mode, rememberLastUsed = true) {
+      load();
+      if (typeof sessionId !== "string" || !MODES.includes(mode)) return false;
       const previous = modes[sessionId];
+      const previousLastUsed = lastUsedMode;
+      if (previous === mode && (!rememberLastUsed || lastUsedMode === mode)) return true;
       modes[sessionId] = mode;
+      if (rememberLastUsed) lastUsedMode = mode;
       if (persist()) return true;
       if (previous === undefined) delete modes[sessionId];
       else modes[sessionId] = previous;
+      lastUsedMode = previousLastUsed;
       return false;
     }
   };
@@ -578,6 +611,19 @@ export function apply(ctx, config) {
     }
   });
 
+  // Seed only genuinely new session agents; resumed sessions retain their own
+  // stored mode (or the configured fallback) rather than changing retroactively.
+  ctx.on("agent/created", ({ agent, source }) => {
+    if (source !== "startup" && source !== "clear") return;
+    const sessionId = sessionIdOf(agent);
+    if (!isSessionAddress(sessionId) || sessionModes.get(sessionId) !== undefined) return;
+    const lastUsed = sessionModes.lastUsedMode();
+    if (!MODES.includes(lastUsed)) return;
+    if (!sessionModes.set(sessionId, lastUsed, false)) {
+      console.error(`[dsh-approval-mode] could not seed new session ${sessionId} with the last-used mode`);
+    }
+  });
+
   /**
    * The default mode in force: an explicit legacy value first (that is where an
    * upgrade to 0.1.7+ left the user's choice, and where a <= 0.1.6 host still
@@ -607,20 +653,33 @@ export function apply(ctx, config) {
    * @returns the outcome, for the route's status code.
    */
   async function writeDefault(mode) {
+    let write;
     if (legacySettings !== null) {
-      await legacySettings.update(NS, { [DEFAULT_MODE_FIELD]: mode });
-      return { ok: true };
+      write = () => legacySettings.update(NS, { [DEFAULT_MODE_FIELD]: mode });
+    } else {
+      if (configForms === null) return { ok: false, error: "settings-unavailable" };
+      const entryId = ownEntryId(ctx);
+      if (entryId === null) return { ok: false, error: "settings-unavailable" };
+      write = () => configForms.update(entryId, { [DEFAULT_MODE_FIELD]: mode });
     }
-    if (configForms === null) return { ok: false, error: "settings-unavailable" };
-    const entryId = ownEntryId(ctx);
-    if (entryId === null) return { ok: false, error: "settings-unavailable" };
-    await configForms.update(entryId, { [DEFAULT_MODE_FIELD]: mode });
-    return { ok: true };
+    const previousLastUsed = sessionModes.lastUsedMode();
+    if (!sessionModes.setLastUsedMode(mode)) return { ok: false, error: "store-write-failed" };
+    try {
+      await write();
+      return { ok: true };
+    } catch (err) {
+      sessionModes.setLastUsedMode(previousLastUsed);
+      throw err;
+    }
   }
 
   /** One snapshot of both stored values. */
   function snapshot() {
-    return { defaultMode: readDefault(), sessions: sessionModes.entries() };
+    return {
+      defaultMode: readDefault(),
+      lastUsedMode: sessionModes.lastUsedMode(),
+      sessions: sessionModes.entries()
+    };
   }
 
   function loadAiHistory() {
@@ -851,7 +910,7 @@ export function apply(ctx, config) {
     const stored = sessionModes.get(sessionId);
     const mode = MODES.includes(stored) ? stored : readDefault();
     const downstream = await next();
-    if (mode !== LLM_AUTO || downstream?.kind === "deny" || downstream?.kind === "cancel") return downstream;
+    if ((mode !== LLM_AUTO && mode !== LLM_AUTO_FALLBACK) || downstream?.kind === "deny" || downstream?.kind === "cancel") return downstream;
 
     const sandboxEscalation = requestsWiderSandbox(exec);
     const internalApproval = requestsInternalAiApproval(exec);
@@ -869,6 +928,10 @@ export function apply(ctx, config) {
         console.log(`[dsh-approval-mode] AI approved ${exec?.name ?? "(unknown tool)"} @ ${sessionId ?? "(unknown session)"}`);
         return { kind: "allow" };
       }
+      return downstream;
+    }
+    if (mode === LLM_AUTO_FALLBACK) {
+      console.log(`[dsh-approval-mode] AI did not approve ${exec?.name ?? "(unknown tool)"}; handing the request to manual approval`);
       return downstream;
     }
     const why = review.decision === "deny" && review.reason ? `: ${review.reason}` : " (review unavailable or returned an invalid decision)";
@@ -894,7 +957,7 @@ export function apply(ctx, config) {
       const mode = MODES.includes(stored) ? stored : readDefault();
       const tool = req && req.toolName ? req.toolName : "(unknown tool)";
       const at = sessionId ? ` @ ${sessionId}` : "";
-      if (mode === LLM_AUTO) {
+      if (mode === LLM_AUTO || mode === LLM_AUTO_FALLBACK) {
         const escalationApproval = isEscalationRequest(req) ? consumeAiApproval(req, sessionId) : null;
         if (escalationApproval) {
           const requestedSandboxMode = /^escalate sandbox to ([^:]+):/i.exec(String(req?.reason ?? ""))?.[1] ?? null;
@@ -910,6 +973,25 @@ export function apply(ctx, config) {
           });
           console.log(`[dsh-approval-mode] AI approved sandbox escalation for ${tool}${at}`);
           return "allowed-once";
+        }
+        if (mode === LLM_AUTO_FALLBACK) {
+          console.log(`[dsh-approval-mode] AI approval missing or denied for ${tool}${at}; delegating to manual approval`);
+          let outcome;
+          try {
+            outcome = await next();
+          } catch (err) {
+            console.error("[dsh-approval-mode] manual fallback approval failed:", err);
+            outcome = "unavailable";
+          }
+          appendAiHistory({
+            kind: "manual-fallback",
+            decision: outcome === "allowed-once" ? "approved" : outcome === "rejected" ? "denied" : "unavailable",
+            sessionId,
+            callId: typeof req?.callId === "string" ? req.callId : null,
+            toolName: tool,
+            reason: typeof req?.reason === "string" ? req.reason : ""
+          });
+          return outcome;
         }
         console.log(`[dsh-approval-mode] AI approval missing or denied for ${tool}${at}; rejecting`);
         return "rejected";
@@ -1016,7 +1098,7 @@ export function apply(ctx, config) {
         });
         return;
       }
-      if (before.defaultMode === mode) {
+      if (before.defaultMode === mode && before.lastUsedMode === mode) {
         writeJson(200, { ok: true, mode, defaultMode: mode, changed: false });
         return;
       }

@@ -14,13 +14,12 @@
  * of the parts whose failure is silent in production — and of the two settings
  * generations the plugin has to bridge:
  *
- *   1. the four mode values match the client half, and the plugin config
+ *   1. the mode values match the client half, and the plugin config
  *      declares the default mode as a live (volatile) field;
  *   2. a sandbox escalation is recognised from the reason "dsh-sandbox"
  *      actually sends — and nothing else is mistaken for one;
- *   3. the answerer's outcome per mode: ask delegates, both bypass modes
- *      auto-approve, and ONLY "bypass-except-escalation" hands an escalation
- *      back to the user;
+ *   3. the answerer's outcome per mode: ask and AI-fallback delegate, bypass
+ *      modes auto-approve, and fail-closed AI rejects unreviewed escalations;
  *   4. the mode is resolved PER SESSION, with the default as the fallback, and
  *      the per-session map survives a restart (it is written to
  *      $DSH_HOME/approval-mode/sessions.json);
@@ -409,7 +408,7 @@ console.log("dsh-approval-mode: host contract");
 
 // 1: the mode vocabulary and the plugin config.
 {
-  check(deepEqual(host.MODES, ["ask", "bypass-except-escalation", "llm-auto", "bypass"]), "the mode vocabulary includes ask, bypass, bypass-except-escalation and llm-auto");
+  check(deepEqual(host.MODES, ["ask", "bypass-except-escalation", "llm-auto", "llm-auto-fallback", "bypass"]), "the mode vocabulary includes manual fallback after AI review");
   check(host.DEFAULT_MODE === "ask", "the unresolved fallback is ask");
   check(host.inject.includes("webServer") && !host.inject.includes("settings"), "only webServer is a required service (settings is optional)");
   const field = host.Config?.shape?.[host.DEFAULT_MODE_FIELD];
@@ -587,7 +586,32 @@ console.log("dsh-approval-mode: host contract");
     arguments: { command: "true" },
     signal: new AbortController().signal
   }, { kind: "ask" });
-  check(unavailable.kind === "deny", "a missing AI reviewer directly rejects instead of requesting human approval");
+  check(unavailable.kind === "deny", "fail-closed AI mode directly rejects instead of requesting human approval");
+}
+{
+  const ui = boot({ generation: "forms", config: liveRef("llm-auto-fallback") });
+  const exec = { callId: "manual-after-unavailable", agent: { id: "s" }, name: "bash", arguments: { command: "true" }, signal: new AbortController().signal };
+  const decision = await ui.preExecute(exec, { kind: "ask", reason: "native approval required" });
+  check(decision.kind === "ask", "AI failure returns the original ask in manual-fallback mode");
+  check((await ui.ask(ordinary("s"))).delegated, "AI-fallback mode delegates the unresolved request to the GUI answerer");
+
+  const escalationExec = { ...exec, callId: "manual-escalation", arguments: { command: "true", sandbox_permissions: "danger-full-access" } };
+  const continues = await ui.preExecute(escalationExec, { kind: "allow" });
+  check(continues.kind === "allow", "AI failure lets an internally approved tool reach DSH's manual escalation gate");
+  const escalationResult = await ui.ask({ ...escalation("s"), toolName: "bash", callId: "manual-escalation" });
+  check(escalationResult.delegated, "an unapproved internal escalation falls back to manual approval");
+  const history = await ui.request({ url: host.AI_HISTORY_ROUTE_PATH + "?session=s" });
+  check(history.body.entries.some((entry) => entry.kind === "manual-fallback"), "manual fallback outcomes are recorded in AI approval history");
+}
+{
+  const ui = boot({
+    generation: "forms",
+    config: liveRef("llm-auto-fallback"),
+    llm: { async *stream() { yield { type: "text-delta", index: 0, text: '{"decision":"deny","reason":"unsafe"}' }; yield { type: "finish", reason: { kind: "stop" } }; } },
+    agentDefaultModel: { currentSelection: () => ({ provider: "test", model: "reviewer" }) }
+  });
+  const decision = await ui.preExecute({ callId: "reviewer-denied", agent: { id: "s" }, name: "bash", arguments: { command: "true" }, signal: new AbortController().signal }, { kind: "ask" });
+  check(decision.kind === "ask", "an explicit AI denial also returns to manual approval in fallback mode");
 }
 
 // 3a: a request whose Agent uses the OLDER shape reaches the same session.
@@ -662,6 +686,7 @@ console.log("dsh-approval-mode: host contract");
   check(host.parseSessionStore("null") === null, "parseSessionStore rejects a JSON null document");
   check(deepEqual(host.parseSessionStore("{\"sessions\":{\"a\":\"bypass\",\"__proto__\":\"bypass\",\"b\":\"nope\"}}"), { a: "bypass" }), "parseSessionStore drops reserved keys and out-of-vocabulary modes");
   check(deepEqual(host.parseSessionStore("{\"a\":\"ask\"}"), { a: "ask" }), "parseSessionStore also reads a bare mode map");
+  check(deepEqual(host.parseSessionStoreDocument("{\"version\":2,\"sessions\":{\"a\":\"ask\"},\"lastUsedMode\":\"llm-auto-fallback\"}"), { sessions: { a: "ask" }, lastUsedMode: "llm-auto-fallback" }), "the versioned store preserves the last-used mode for fresh sessions");
 }
 
 // 9: the legacy namespace still decides the default, migrations included.
@@ -682,6 +707,28 @@ console.log("dsh-approval-mode: host contract");
   check(readFileSync(storePathOf(home), "utf8").includes("\"one\": \"bypass\""), "and is carried into the store file");
   const again = boot({ generation: "legacy", section: { defaultMode: "ask" }, home });
   check((await again.ask(ordinary("one"))).outcome === "allowed-once", "the carried map outlives the legacy document");
+}
+
+// 10a: new sessions inherit the most recently selected mode, while resumes do not.
+{
+  const home = freshHome();
+  const ui = boot({ generation: "forms", config: liveRef("ask"), home });
+  const selected = await ui.request({ method: "POST", url: host.ROUTE_PATH + "?session=prior", body: JSON.stringify({ mode: "llm-auto-fallback" }) });
+  check(selected.status === 200 && selected.body.mode === "llm-auto-fallback", "choosing a session mode stores it as the last-used new-session mode");
+  ui.emit("agent/created", { agent: { id: "fresh" }, source: "startup" });
+  const fresh = await ui.request({ url: host.ROUTE_PATH + "?session=fresh" });
+  check(fresh.body.mode === "llm-auto-fallback", "a new startup session is seeded from the last-used mode");
+  ui.emit("agent/created", { agent: { id: "resumed" }, source: "resume" });
+  const resumed = await ui.request({ url: host.ROUTE_PATH + "?session=resumed" });
+  check(resumed.body.mode === "ask", "resuming an existing session does not overwrite it with the last-used mode");
+  const restarted = boot({ generation: "forms", config: liveRef("ask"), home });
+  restarted.emit("agent/created", { agent: { id: "fresh-after-restart" }, source: "startup" });
+  const persisted = await restarted.request({ url: host.ROUTE_PATH + "?session=fresh-after-restart" });
+  check(persisted.body.mode === "llm-auto-fallback", "the last-used session mode survives a plugin restart");
+  const changedDefault = await restarted.request({ method: "POST", url: host.ROUTE_PATH, body: JSON.stringify({ mode: "bypass" }) });
+  check(changedDefault.status === 200, "setting a new configured default also updates the new-session seed");
+  restarted.emit("agent/created", { agent: { id: "fresh-after-default" }, source: "startup" });
+  check((await restarted.request({ url: host.ROUTE_PATH + "?session=fresh-after-default" })).body.mode === "bypass", "a new session inherits the mode explicitly selected as the default");
 }
 
 // 11: a host with no settings service at all.

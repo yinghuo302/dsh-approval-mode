@@ -15,18 +15,19 @@ DSH 的审批系统（`@deepseek-ai/dsh-user-approval`）内置两种会话级�
 
 **不存在"自动批准"策略**——`never` 是"直接拒绝"而非"自动批准"。因此"绕过审批"必须由插件实现，且提权豁免没有原生对应物。
 
-**目标**：在 DSH 窗口内、权限选择（access mode）控件旁边，提供可手动选择的「审批模式」控件（默认审批 / 工具免审 / AI审批 / 绕过审批），并按会话持久保存。
+**目标**：在 DSH 窗口内、权限选择（access mode）控件旁边，提供可手动选择的「审批模式」控件，并按会话持久保存；新会话继承最近使用的模式。
 
-四个模式：
+五个模式：
 
 | 模式 | 普通工具调用 | 沙箱提权（工作区外写文件、需更宽沙箱的命令） |
 | --- | --- | --- |
 | `ask`（默认审批） | 走 DSH 原生审批（点击批准） | 弹窗，用户决定 |
 | `bypass-except-escalation`（工具免审） | 自动放行 | **弹窗，用户决定** |
-| `llm-auto`（AI审批） | 仅当 DSH 下游为 `ask` 时调用模型；仅规定的 JSON `approve` 结果放行，其他结果直接拒绝 | Bash 请求更宽模式时由模型判定；相同/更窄权限不触发升级审核；仅匹配 AI 已批准 `callId` 的请求放行 |
+| `llm-auto`（AI审批，失败拒绝） | 仅当 DSH 下游为 `ask` 时调用模型；只有 JSON `approve` 放行，拒绝/故障直接拒绝 | 更宽 sandbox 请求由模型审查；相同/更窄权限不触发；内部提权只放行匹配的 AI `callId` |
+| `llm-auto-fallback`（AI审批失败转手动） | AI 批准放行；拒绝/故障保留 DSH 的 `ask` 交用户点击 | AI 批准的请求按 `callId` 一次性放行；其他情况继续 DSH 人工审批 |
 | `bypass`（绕过审批） | 自动放行 | 自动放行 |
 
-`llm-auto` 在 `tools/pre-execute` 先运行 DSH 下游 gate。若 gate 为 `allow` 且请求未严格扩大 sandbox mode，直接沿用 DSH 决策，不调用 AI；若下游为 `ask` 或 Bash 请求更宽权限，才将工具名、描述、Schema 和完整参数交给当前模型审查。普通工具审核不会收到主会话历史或审批模式设置；仅 `plugin_manager` 审核会附带当前会话最近最多 3 条、每条限长的直接用户消息，以判断操作是否符合用户意图，不包含助手/工具/注入消息，也不写入审批历史。工具输入仍视为不可信数据；模型服务缺失、超时、拒绝或输出不符合 JSON 决策协议时均直接拒绝工具调用。若已批准的工具执行内部发起沙箱提权，`approval/request` 通过相同 `callId` 消耗该次 AI 批准，`tools/result` 后即清除；没有匹配审批记录的请求直接拒绝。
+两种 AI 模式都先运行 DSH 下游 gate：只有下游为 `ask`、Bash 请求更宽 sandbox 或 `plugin_manager` 将在执行内部提权时才调用 reviewer；相同/更窄权限直接沿用 DSH 决策。工具名、描述、Schema 和完整参数交给当前模型。普通工具审核不收到主会话历史或审批模式设置；仅 `plugin_manager` 审核会附带最近最多 3 条、每条限长的直接用户消息，以核对操作意图，不包含助手/工具/注入消息，也不写入审批历史。`llm-auto` 在 AI 拒绝/故障时直接拒绝；`llm-auto-fallback` 保留下游 `ask`，内部提权则交给 `approval/request` 的人工 answerer。两种模式的 AI 批准都按同一 `callId` 一次性匹配并在 `tools/result` 后清理；无匹配记录时前者拒绝、后者委派人工审批。
 
 「提权」指 `@deepseek-ai/dsh-sandbox` 的 `approveEscalation()`：受限调用被拒绝后，模型用 `sandbox_permissions` + `justification` 重试同一次调用，请求一次严格更宽的模式。它是唯一会**放宽**沙箱边界的审批，因此单独成一档。
 
@@ -44,15 +45,17 @@ DSH 的审批系统（`@deepseek-ai/dsh-user-approval`）内置两种会话级�
 │ │    <=0.1.6：走遗留 settings 命名空间 "approval-mode"      │
 │ │    （该服务仍有 register 时注册并读写；遗留 mode 仍可读）  │
 │ ├─ 按会话模式 = $DSH_HOME/approval-mode/sessions.json       │
-│ │    { sessionId -> mode }，原子写入；无文件时一次性迁移旧   │
-│ │    settings 文档里的 sessions 映射                         │
+│ │    { sessionId -> mode, lastUsedMode }，原子写入；兼容旧版 │
+│ │    新 startup session 继承 lastUsedMode，resume 不覆盖    │
 │ ├─ tools/pre-execute（prepend: true）                       │
-│ │    llm-auto -> 下游 ask / sandbox 扩权才调用 reviewer    │
-│ │       权限相同/更窄直接沿用 DSH；拒绝/失败直接 deny      │
+│ │    两种 llm-auto -> DSH ask / sandbox 扩权 / 内部提权时审 │
+│ │    llm-auto -> AI 拒绝/故障直接 deny                      │
+│ │    llm-auto-fallback -> 保留下游 ask，内部提权交后续手动  │
 │ ├─ approval/request 应答器（prepend: true）                │
 │ │    bypass                    -> "allowed-once"           │
 │ │    bypass-except-escalation  -> 提权 next()，其余放行    │
-│ │    llm-auto -> 仅匹配已批准 callId 的提权放行，否则拒绝 │
+│ │    llm-auto -> 匹配 callId 放行，否则拒绝                 │
+│ │    llm-auto-fallback -> 匹配 callId 放行，否则 next()      │
 │ │    ask                       -> next()                   │
 │ ├─ 会话地址由 sessionIdOf 解析：0.2.0 的 agent.id /        │
 │ │    更早的 agent.session.id；无地址则使用默认值            │
@@ -167,22 +170,21 @@ reason: `escalate sandbox to ${mode}: ${justification}`
 | 值 | 存储 | 谁写 | 0.1.7+ | <=0.1.6 |
 | --- | --- | --- | --- | --- |
 | **默认模式** | 插件 `Config.defaultMode`（`.volatile()`）；旧宿主是 settings 命名空间 `approval-mode` | 宿主配置表单（0.1.7+）／插件页卡片（<=0.1.6） | profile patch，由宿主写入后就地更新引用 | settings.yaml |
-| **按会话模式** | `$DSH_HOME/approval-mode/sessions.json` | 工具栏按钮（控制路由） | 同一份文件 | 同一份文件（首次迁移旧 `sessions`） |
+| **按会话模式 / 最近使用模式** | `$DSH_HOME/approval-mode/sessions.json`（v2；兼容 v1 与裸 map） | 工具栏按钮；设置默认值同步更新最近使用模式 | 同一份文件 | 同一份文件（首次迁移旧 `sessions`） |
 
 **为什么按会话模式不进 Config**：0.1.7+ 的 settings 服务只能编辑**插件 Config**，而那是
 写进 profile patch 的静态配置；按会话状态以开放的 session id 为键、随会话增减，塞进配置会
 污染 profile patch、每次切换都重写配置文件，语义也不对。运行期状态因此放在插件自有目录，
 **原子写入**（临时文件 + `rename`），读取同步、懒加载一次——应答器在水瀑布里不能 `await`。
 
-- **解析顺序**：会话文件命中 → 默认模式 → `ask`。`unknown` / 越界值一律回落到 `ask`
-  （fail closed）；文件损坏时按空处理并记日志，下一次写入即修复。
+- **会话模式解析**：已有会话自己的模式 → 配置默认值 → `ask`。最近使用模式仅在新的 `startup`/`clear` Agent 创建时写成该 session 的初始模式，不改写 `resume` 会话。`unknown` / 越界值一律回落到 `ask`；文件损坏时按空处理并记日志，下一次写入即修复。
 - **默认模式的优先级**：遗留命名空间里的**显式**值（升级前用户的选择，<=0.1.6 宿主仍在写）
   → live config 引用（0.1.7+）→ 普通 config 值 → `ask`。这样两代宿主、以及只是把
   `Config` 解析成普通值的老 schemastery，都不会读错来源。
-- **迁移**：文件不存在时，把旧 settings 文档里的 `sessions` 映射一次性搬进文件并落盘；
-  之后不再读它（旧文档里的值保持原样，不做写回）。
+- **迁移**：文件不存在时，把旧 settings 文档里的 `sessions` 映射一次性搬进 v2 文件并落盘；
+  之后不再读它（旧文档里的值保持原样，不做写回）。旧 v1 文件读取后会在下次写入时升级到 v2。
 - Host 会话模式在审批前从内存映射读取；默认模式读取 live Config 或旧 settings 值，无需模式变更事件同步。
-- 模式状态仅存于插件 Config 与 `$DSH_HOME/approval-mode/sessions.json`。切换模式不会调用
+- 模式状态仅存于插件 Config 与 `$DSH_HOME/approval-mode/sessions.json`（含 lastUsedMode）。切换模式不会调用
   `Agent.inject()`，不写入 Agent 收件箱/会话历史，也不会作为 prompt 内容发送给模型。
 
 ### 3.3.1 控制路由契约

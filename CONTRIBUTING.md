@@ -95,12 +95,11 @@ node scripts/check-host.mjs
 在这里失败，而不是在用户的 profile 里表现为「插件不兼容」），加载**真实的 `index.js`**，
 并用假的 settings / webServer / tools / llm 上下文断言：
 
-1. 模式词汇就是 client 侧提供的四个值，且 `Config` 把默认模式声明成实时（volatile）字段；
+1. 模式词汇与 client 侧的五个值一致，且 `Config` 把默认模式声明成实时（volatile）字段；
 2. 提权按 `dsh-sandbox` 真正发出的 reason 前缀识别，且不误判普通审批；
-3. 每个模式的应答结果：`ask` 全部委派、两种绕过都自动放行、**只有**
-   `bypass-except-escalation` 把提权交回用户；
-4. 模式按会话解析、默认值兜底，且会话映射**跨重启存活**（写入 `$DSH_HOME/approval-mode/
-   sessions.json`）；
+3. 每个模式的应答结果：`ask` 与 AI-fallback 委派、两种绕过自动放行、fail-closed AI 拒绝、
+   **只有** `bypass-except-escalation` 将提权交回用户；
+4. 模式按会话解析、最近使用模式 v2 状态跨重启存活；新 startup session 继承 last-used，resume 不覆盖；
 5. **两代 settings 服务**：<=0.1.6 的 `register/get/update` 命名空间与 0.1.7+ 的
    `describe/update` 配置表单都覆盖到——后者**没有 `register`**，正是本次回归（旧代码在此
    抛 `TypeError` 导致宿主半不挂载）；另外覆盖「完全没有 settings 服务」的组合；
