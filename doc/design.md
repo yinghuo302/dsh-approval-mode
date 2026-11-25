@@ -22,8 +22,11 @@ DSH 的审批系统（`@deepseek-ai/dsh-user-approval`）内置两种会话级�
 | 模式 | 普通工具调用 | 沙箱提权（工作区外写文件、需更宽沙箱的命令） |
 | --- | --- | --- |
 | `ask` | 走 DSH 原生审批（点击批准） | 弹窗，用户决定 |
+| `llm-auto` | 当前默认模型评估；严格 `APPROVE` 才放行，其他结果交给用户 | 同样由模型评估，可批准或交还用户 |
 | `bypass-except-escalation` | 自动放行 | **弹窗，用户决定** |
 | `bypass` | 自动放行 | 自动放行 |
+
+`llm-auto` 的审批事件上下文仅包含工具名和审批原因，不含参数或对话历史；模型被明确要求不推断缺失信息，提示信息不足时拒绝。
 
 「提权」指 `@deepseek-ai/dsh-sandbox` 的 `approveEscalation()`：受限调用被拒绝后，模型用 `sandbox_permissions` + `justification` 重试同一次调用，请求一次严格更宽的模式。它是唯一会**放宽**沙箱边界的审批，因此单独成一档。
 

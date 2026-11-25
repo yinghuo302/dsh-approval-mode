@@ -16,6 +16,7 @@ DSH 审批模式插件。在 DSH 窗口的权限下拉框（Read Only / Workspac
 
 - 按钮在输入框工具栏、权限选择旁边，样式和权限控件一致
 - **默认审批**：和 DSH 原有行为一样，工具调用需要点击批准
+- **LLM 自动审批**：当前默认模型逐项判断（DSH 审批事件只提供工具名和审批原因，不含参数或对话历史，因此模型必须对信息不足的请求拒绝）；只有严格返回 `APPROVE` 才放行。拒绝、格式错误、超时或模型故障时回到人工审批，包括沙箱提权。
 - **绕过审批（提权除外）**：工具调用自动批准；工作区外写文件、执行命令所需的提权仍会弹窗，由你决定
 - **绕过审批**：所有工具调用自动批准，含提权，不弹任何提示（高风险）
 - 切换立即生效，并按会话持久保存
@@ -48,7 +49,7 @@ DSH 审批模式插件。在 DSH 窗口的权限下拉框（Read Only / Workspac
 
 ## 安装
 
-需要 [dsh CLI](https://github.com/deepseek-ai/deepseek-harness)（下界 `0.1.1-rc.2`，实测 `0.1.5-rc.2`、`0.1.7-rc.1` 与 `0.2.0-rc.1`，见下方版本说明）。
+需要 [dsh CLI](https://github.com/deepseek-ai/deepseek-harness)（下界 `0.1.1-rc.2`，实测 `0.1.5-rc.2`、`0.1.7-rc.1`、`0.2.0-rc.1` 与 `0.2.0-rc.2`（manifest 兼容性检查），见下方版本说明）。
 
 从 GitHub 仓库安装：
 
@@ -62,7 +63,7 @@ dsh plugin --profile web add github:NEVSTOP-LAB/dsh-approval-mode
 > [!NOTE]
 > **版本要求**：DSH `0.1.1-rc.2` 及以上（无上界）；已在 DSH `0.1.5-rc.2`
 > （DSH Desktop 2.0.11）、`0.1.7-rc.1`（DSH Desktop 2.0.14）与 `0.2.0-rc.1`
-> （DSH Desktop 2.0.16）上验证。低于 `0.1.1-rc.2` 的宿主会被 dsh-market 标记为
+> （DSH Desktop 2.0.16）；`0.2.0-rc.2` 通过当前宿主 manifest 兼容性校验（尚未做 GUI 端到端安装验证）。低于 `0.1.1-rc.2` 的宿主会被 dsh-market 标记为
 > 「低于声明下界」，请先升级 DSH。
 > 0.1.7 更换了 settings 服务的契约（插件 Config 取代命名空间），本插件两代都支持；
 > 升级后默认模式需要重设一次，见上文「配置」。

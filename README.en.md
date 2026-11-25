@@ -16,6 +16,7 @@ An approval mode plugin for DSH. Adds an "approval mode" button next to the perm
 
 - The button sits in the composer toolbar next to the permission selector, styled like the permission control
 - **Default approval**: identical to stock DSH — tool calls require a click to approve
+- **LLM auto-approval**: the current default model reviews each request (DSH's approval event provides only a tool name and reason, not arguments or conversation history, so the model is instructed to deny when that is insufficient); only the exact response `APPROVE` allows it, while denial, malformed output, timeout, or model failure returns to human approval, including for sandbox escalations
 - **Bypass, escalations excepted**: tool calls are auto-approved; widening the sandbox to write outside the workspace still prompts you
 - **Bypass approval**: every tool call is auto-approved, escalations included, with no prompt at all (high risk)
 - Changes apply immediately and persist per session
@@ -46,7 +47,7 @@ Both apply immediately and persist.
 
 ## Install
 
-Requires the [dsh CLI](https://github.com/deepseek-ai/deepseek-harness) (lower bound `0.1.1-rc.2`, verified on `0.1.5-rc.2`, `0.1.7-rc.1` and `0.2.0-rc.1` — see the version note below).
+Requires the [dsh CLI](https://github.com/deepseek-ai/deepseek-harness) (lower bound `0.1.1-rc.2`, verified on `0.1.5-rc.2`, `0.1.7-rc.1`, `0.2.0-rc.1` and manifest-checked on `0.2.0-rc.2` — see the version note below).
 
 Install from the GitHub repository:
 
@@ -60,7 +61,7 @@ dsh plugin --profile web add github:NEVSTOP-LAB/dsh-approval-mode
 > [!NOTE]
 > **Version requirement**: DSH `0.1.1-rc.2` or newer (no upper bound); verified on DSH
 > `0.1.5-rc.2` (DSH Desktop 2.0.11), `0.1.7-rc.1` (DSH Desktop 2.0.14) and `0.2.0-rc.1`
-> (DSH Desktop 2.0.16). An older host is reported by dsh-market as "below declared
+> (DSH Desktop 2.0.16); `0.2.0-rc.2` passes the installed host's manifest compatibility check (GUI end-to-end installation not yet tested). An older host is reported by dsh-market as "below declared
 > minimum", so upgrade DSH first.
 > 0.1.7 replaced the settings service contract (plugin Config instead of namespaces); this plugin supports
 > both, and the default mode has to be set once after that upgrade — see Configuration above.

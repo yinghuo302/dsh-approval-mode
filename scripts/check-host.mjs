@@ -284,6 +284,8 @@ function boot(options = {}) {
       return () => {};
     },
     get(name) {
+      if (name === "llm") return options.llm;
+      if (name === "agentDefaultModel") return options.agentDefaultModel;
       if (name === "agents") return { list: () => agents };
       if (name === "dshHomePath") return (...segments) => path.join(home, ...segments);
       if (name === "configEditor") return configEditor;
@@ -422,7 +424,7 @@ console.log("dsh-approval-mode: host contract");
 
 // 1: the mode vocabulary and the plugin config.
 {
-  check(deepEqual(host.MODES, ["ask", "bypass-except-escalation", "bypass"]), "the mode vocabulary is ask / bypass-except-escalation / bypass");
+  check(deepEqual(host.MODES, ["ask", "bypass-except-escalation", "llm-auto", "bypass"]), "the mode vocabulary includes ask, bypass, bypass-except-escalation and llm-auto");
   check(host.DEFAULT_MODE === "ask", "the unresolved fallback is ask");
   check(host.inject.includes("webServer") && !host.inject.includes("settings"), "only webServer is a required service (settings is optional)");
   const field = host.Config?.shape?.[host.DEFAULT_MODE_FIELD];
@@ -494,6 +496,33 @@ console.log("dsh-approval-mode: host contract");
   check((await ui.ask(ordinary("s"))).outcome === "allowed-once", "bypass-except-escalation auto-approves an ordinary request");
   const handed = await ui.ask(escalation("s"));
   check(handed.delegated && handed.outcome === "unavailable", "bypass-except-escalation hands an escalation to the user instead of approving it");
+}
+
+// 3b: LLM mode uses the currently selected model and fails open to the user, not to approval.
+{
+  let decision = "APPROVE";
+  const calls = [];
+  const ui = boot({
+    generation: "forms",
+    config: liveRef("llm-auto"),
+    agentDefaultModel: { currentSelection: () => ({ provider: "test-provider", model: "reviewer" }) },
+    llm: {
+      async *stream(options) {
+        calls.push(options);
+        yield { type: "text-delta", text: decision };
+        yield { type: "finish", reason: { kind: "stop" } };
+      }
+    }
+  });
+  check((await ui.ask(ordinary("s"))).outcome === "allowed-once", "LLM auto mode approves only the exact affirmative response");
+  check(calls[0]?.provider === "test-provider" && calls[0]?.model === "reviewer", "LLM review uses the currently selected default model");
+  decision = "DENY";
+  const rejected = await ui.ask(ordinary("s"));
+  check(rejected.delegated, "an LLM denial is handed to the user for the final decision");
+  decision = "APPROVE\\nexplanation";
+  check((await ui.ask(escalation("s"))).delegated, "non-exact LLM output does not approve a sandbox escalation");
+  decision = "APPROVE";
+  check((await ui.ask(escalation("s"))).outcome === "allowed-once", "an explicit LLM approval can approve escalation requests in LLM mode");
 }
 
 // 3a: a request whose Agent uses the OLDER shape reaches the same session.

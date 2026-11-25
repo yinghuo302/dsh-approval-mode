@@ -272,12 +272,12 @@ console.log("dsh-approval-mode: client bundle contract");
   const texts = collectText(tree).join(" | ");
   check(tree.type === "li", "card renders a list item (the tab's container is a <ul>)");
   check(texts.includes(ui.dictionaries[NS].zh["card.title"]), "card header shows the plugin title");
-  const items = ["item.ask", "item.bypassSafe", "item.bypass"].map((key) => ui.dictionaries[NS].zh[key]);
+  const items = ["item.ask", "item.llmAuto", "item.bypassSafe", "item.bypass"].map((key) => ui.dictionaries[NS].zh[key]);
   check(items.every((label) => texts.includes(label)), "card shows every mode option");
   check(texts.includes(ui.dictionaries[NS].zh["card.hint.bypass"]), "card explains the currently selected mode");
 
   const radios = findBy(tree, (node) => node.props?.role === "radio");
-  check(radios.length === 3, "card renders exactly three radio options");
+  check(radios.length === 4, "card renders exactly four radio options");
   const chosen = radios.find((node) => collectText(node).join("") === ui.dictionaries[NS].zh["item.bypass"]);
   const others = radios.filter((node) => node !== chosen);
   check(chosen?.props?.["aria-checked"] === true, "the current mode is the checked option");
@@ -309,7 +309,7 @@ console.log("dsh-approval-mode: client bundle contract");
   check(requests.some((entry) => entry.url === SESSION_ROUTE), "the picker reads the SESSION address");
 
   const menuitems = findBy(menu, (node) => node.props?.role === "menuitem");
-  check(menuitems.length === 3, "the picker offers exactly three modes");
+  check(menuitems.length === 4, "the picker offers exactly four modes");
   menuitem(menu, ui.dictionaries[NS].zh["item.bypass"])?.props?.onClick?.();
   await tick();
   const post = requests.find((entry) => entry.method === "POST");
@@ -352,7 +352,7 @@ console.log("dsh-approval-mode: client bundle contract");
   await tick();
   const card = ui.render(CARD_SLOT, [undefined, true]);
   const radios = findBy(card, (node) => node.props?.role === "radio");
-  check(radios.length === 3 && radios.every((node) => node.props["aria-checked"] === false), "after a failed read the card marks no option");
+  check(radios.length === 4 && radios.every((node) => node.props["aria-checked"] === false), "after a failed read the card marks no option");
   check(collectText(card).join(" ").includes(ui.dictionaries[NS].zh["card.error"]), "after a failed read the card shows the error line");
 
   const label = toolbarLabel(ui.render(SELECT_SLOT, [undefined]));
