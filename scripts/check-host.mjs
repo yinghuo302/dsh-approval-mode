@@ -494,6 +494,7 @@ console.log("dsh-approval-mode: host contract");
   check(calls[0]?.provider === "test-provider" && calls[0]?.model === "reviewer", "AI review uses the currently selected default model");
   check(calls[0]?.messages?.[0]?.content?.[0]?.text?.includes('"command":"true"'), "AI receives the actual parsed tool arguments");
   check(calls[0]?.system?.includes("untrusted data"), "tool input is explicitly treated as untrusted review data");
+  check(calls[0]?.system?.includes("Do not require the command to technically need the wider mode"), "AI judges the command's safety rather than requiring technical privilege necessity");
   const firstHistory = await ui.request({ url: host.AI_HISTORY_ROUTE_PATH + "?session=s" });
   check(firstHistory.status === 200 && firstHistory.body.entries[0]?.decision === "approved", "AI approval decisions are persisted and queryable for this session");
   check(firstHistory.body.entries[0]?.arguments?.command === "true", "the history view retains detailed redacted call arguments");
