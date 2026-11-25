@@ -1,6 +1,6 @@
 # DSH-Approval-Mode
 
-An approval mode plugin for DSH. Adds an "approval mode" button next to the permission selector (Read Only / Workspace Write / Full Access) in the DSH window. Keep the permission at **Workspace Write** and pick "Bypass, escalations excepted" — tool calls are auto-approved, while file operations stay sandboxed to the workspace, safer and more convenient than Full Access.
+An approval mode plugin for DSH. Adds an "approval mode" button next to the permission selector (Read Only / Workspace Write / Full Access) in the DSH window. Keep the permission at **Workspace Write** and pick "Tool auto-approval" — tool calls are auto-approved, while file operations stay sandboxed to the workspace, safer and more convenient than Full Access.
 
 > [!IMPORTANT]
 > Both bypass modes **auto-approve tool calls**; ordinary operations show no confirmation prompt.
@@ -16,8 +16,8 @@ An approval mode plugin for DSH. Adds an "approval mode" button next to the perm
 
 - The button sits in the composer toolbar next to the permission selector, styled like the permission control
 - **Default approval**: identical to stock DSH — tool calls require a click to approve
-- **LLM auto-approval**: the current default model reviews each request (DSH's approval event provides only a tool name and reason, not arguments or conversation history, so the model is instructed to deny when that is insufficient); only the exact response `APPROVE` allows it, while denial, malformed output, timeout, or model failure returns to human approval, including for sandbox escalations
-- **Bypass, escalations excepted**: tool calls are auto-approved; widening the sandbox to write outside the workspace still prompts you
+- **AI approval**: the current default model reviews each request (DSH's approval event provides only a tool name and reason, not arguments or conversation history, so the model is instructed to deny when that is insufficient); only the exact response `APPROVE` allows it, while denial, malformed output, timeout, or model failure returns to human approval, including for sandbox escalations
+- **Tool auto-approval**: ordinary tool calls are auto-approved; widening the sandbox to write outside the workspace still prompts you
 - **Bypass approval**: every tool call is auto-approved, escalations included, with no prompt at all (high risk)
 - Changes apply immediately and persist per session
 - The button turns orange in either bypass mode: a hollow shield for escalations-excepted, a bolt for full bypass

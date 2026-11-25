@@ -385,15 +385,15 @@ function modeSentence(mode, en) {
   if (en) {
     switch (mode) {
       case BYPASS: return "bypass approval (every tool call is auto-approved, sandbox escalations included)";
-      case BYPASS_EXCEPT_ESCALATION: return "bypass approval except escalations (tool calls are auto-approved; widening the sandbox outside the workspace still asks the user)";
-      case LLM_AUTO: return "LLM-reviewed approval (the configured model decides; uncertain or failed reviews ask the user)";
+      case BYPASS_EXCEPT_ESCALATION: return "tool auto-approval (ordinary tool calls pass automatically; sandbox escalations still ask the user)";
+      case LLM_AUTO: return "AI approval (the configured model decides; uncertain or failed reviews ask the user)";
       default: return "default approval (tool calls require a click to approve)";
     }
   }
   switch (mode) {
     case BYPASS: return "绕过审批（所有工具调用自动批准，含工作区外提权）";
-    case BYPASS_EXCEPT_ESCALATION: return "绕过审批（提权除外）（工具调用自动批准，工作区外提权仍会询问用户）";
-    case LLM_AUTO: return "LLM 自动审批（由当前默认模型判断；不确定或模型故障时转人工审批）";
+    case BYPASS_EXCEPT_ESCALATION: return "工具免审（普通工具调用自动批准，工作区外提权仍会询问用户）";
+    case LLM_AUTO: return "AI审批（由当前默认模型判断；不确定或模型故障时转人工审批）";
     default: return "默认审批（工具调用需要点击审批）";
   }
 }

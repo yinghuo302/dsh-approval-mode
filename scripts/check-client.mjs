@@ -272,7 +272,7 @@ console.log("dsh-approval-mode: client bundle contract");
   const texts = collectText(tree).join(" | ");
   check(tree.type === "li", "card renders a list item (the tab's container is a <ul>)");
   check(texts.includes(ui.dictionaries[NS].zh["card.title"]), "card header shows the plugin title");
-  const items = ["item.ask", "item.llmAuto", "item.bypassSafe", "item.bypass"].map((key) => ui.dictionaries[NS].zh[key]);
+  const items = ["item.ask", "item.bypassSafe", "item.llmAuto", "item.bypass"].map((key) => ui.dictionaries[NS].zh[key]);
   check(items.every((label) => texts.includes(label)), "card shows every mode option");
   check(texts.includes(ui.dictionaries[NS].zh["card.hint.bypass"]), "card explains the currently selected mode");
 
