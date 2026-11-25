@@ -23,10 +23,10 @@ DSH 的审批系统（`@deepseek-ai/dsh-user-approval`）内置两种会话级�
 | --- | --- | --- |
 | `ask`（默认审批） | 走 DSH 原生审批（点击批准） | 弹窗，用户决定 |
 | `bypass-except-escalation`（工具免审） | 自动放行 | **弹窗，用户决定** |
-| `llm-auto`（AI审批） | 当前默认模型评估；严格 `APPROVE` 才放行，其他结果交给用户 | 同样由模型评估，可批准或交还用户 |
+| `llm-auto`（AI审批） | `tools/pre-execute` 将工具描述、参数 Schema 与完整参数交给当前默认模型；只有规定的 JSON `approve` 结果放行，其他结果转人工 | 同样由模型评估，可批准或交还用户 |
 | `bypass`（绕过审批） | 自动放行 | 自动放行 |
 
-`llm-auto` 的审批事件上下文仅包含工具名和审批原因，不含参数或对话历史；模型被明确要求不推断缺失信息，提示信息不足时拒绝。
+`llm-auto` 在 `tools/pre-execute` 审查实际工具名、描述、参数 Schema 与完整参数；模型不会收到主会话历史或审批模式设置。工具输入被视为不可信数据；模型服务缺失、超时、拒绝或输出不符合 JSON 决策协议时均退回人工审批。
 
 「提权」指 `@deepseek-ai/dsh-sandbox` 的 `approveEscalation()`：受限调用被拒绝后，模型用 `sandbox_permissions` + `justification` 重试同一次调用，请求一次严格更宽的模式。它是唯一会**放宽**沙箱边界的审批，因此单独成一档。
 
@@ -46,17 +46,17 @@ DSH 的审批系统（`@deepseek-ai/dsh-user-approval`）内置两种会话级�
 │ ├─ 按会话模式 = $DSH_HOME/approval-mode/sessions.json       │
 │ │    { sessionId -> mode }，原子写入；无文件时一次性迁移旧   │
 │ │    settings 文档里的 sessions 映射                         │
-│ ├─ approval/request 应答器（prepend: true，水瀑布最前端）  │
-│ │    会话地址由 sessionIdOf 解析：0.2.0 的 agent.id /        │
-│ │    更早的 agent.session.id；两者都没有则用默认值          │
+│ ├─ tools/pre-execute（prepend: true）                       │
+│ │    llm-auto -> 审查工具描述/Schema/完整参数              │
+│ │       仅 AI 批准转换下游 ask 为 allow；拒绝/失败转人工    │
+│ ├─ approval/request 应答器（prepend: true）                │
 │ │    bypass                    -> "allowed-once"           │
 │ │    bypass-except-escalation  -> 提权 next()，其余放行    │
-│ │    ask                       -> next()                   │
-│ ├─ webServer 控制路由 GET/POST /approval-mode（回环校验）  │
-│ │    地址决定对象：无 session=默认值，?session=会话        │
-│ └─ 变更观察：settings/updated（旧）或 loader/volatile-update │
-│      （0.1.7+ 配置表单写入）-> 只通知生效模式变了的会话     │
-│      通知消息在插件内构造（randomUUID + deepFreeze）        │
+│ │    ask / llm-auto            -> next()                   │
+│ ├─ 会话地址由 sessionIdOf 解析：0.2.0 的 agent.id /        │
+│ │    更早的 agent.session.id；无地址则使用默认值            │
+│ └─ webServer 控制路由 GET/POST /approval-mode（回环校验）  │
+│      模式只存配置/插件文件，永不注入会话上下文              │
 └────────────────────────────────────────────────────────────┘
         same-origin fetch（GET/POST /approval-mode[?session=…]）
 ┌────────────────────────────────────────────────────────────┐
@@ -180,11 +180,9 @@ reason: `escalate sandbox to ${mode}: ${justification}`
   `Config` 解析成普通值的老 schemastery，都不会读错来源。
 - **迁移**：文件不存在时，把旧 settings 文档里的 `sessions` 映射一次性搬进文件并落盘；
   之后不再读它（旧文档里的值保持原样，不做写回）。
-- Host 应答器每次请求时实时读取内存中的引用与映射，无需事件同步。
-- 模式变更时逐个比较每个在线代理的**生效模式**前后是否变化，只向真的变了的会话 `inject`
-  一条用户消息（尽力而为）。改默认值只会通知跟随默认值的会话，改某个会话只通知该会话。
-  变更来源有三处，收敛在同一个观察点、每个变化只通知一次：本插件自己的写入、旧命名空间的
-  `settings/updated`、以及 0.1.7+ 载入器提交 volatile 更新后发出的 `loader/volatile-update`。
+- Host 会话模式在审批前从内存映射读取；默认模式读取 live Config 或旧 settings 值，无需模式变更事件同步。
+- 模式状态仅存于插件 Config 与 `$DSH_HOME/approval-mode/sessions.json`。切换模式不会调用
+  `Agent.inject()`，不写入 Agent 收件箱/会话历史，也不会作为 prompt 内容发送给模型。
 
 ### 3.3.1 控制路由契约
 

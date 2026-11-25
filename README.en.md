@@ -16,7 +16,7 @@ An approval mode plugin for DSH. Adds an "approval mode" button next to the perm
 
 - The button sits in the composer toolbar next to the permission selector, styled like the permission control
 - **Default approval**: identical to stock DSH — tool calls require a click to approve
-- **AI approval**: the current default model reviews each request (DSH's approval event provides only a tool name and reason, not arguments or conversation history, so the model is instructed to deny when that is insufficient); only the exact response `APPROVE` allows it, while denial, malformed output, timeout, or model failure returns to human approval, including for sandbox escalations
+- **AI approval**: before execution, the current default model reviews the actual tool name, description, input schema, and complete arguments; only the required JSON approval result allows the call. Denial, malformed output, timeout, or model failure returns to human approval, including for sandbox escalations. The review receives only this call, not the conversation history.
 - **Tool auto-approval**: ordinary tool calls are auto-approved; widening the sandbox to write outside the workspace still prompts you
 - **Bypass approval**: every tool call is auto-approved, escalations included, with no prompt at all (high risk)
 - Changes apply immediately and persist per session

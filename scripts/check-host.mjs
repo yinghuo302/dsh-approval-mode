@@ -14,8 +14,8 @@
  * of the parts whose failure is silent in production — and of the two settings
  * generations the plugin has to bridge:
  *
- *   1. the mode vocabulary is the three values the client half offers, and the
- *      plugin config declares the default mode as a live (volatile) field;
+ *   1. the four mode values match the client half, and the plugin config
+ *      declares the default mode as a live (volatile) field;
  *   2. a sandbox escalation is recognised from the reason "dsh-sandbox"
  *      actually sends — and nothing else is mistaken for one;
  *   3. the answerer's outcome per mode: ask delegates, both bypass modes
@@ -36,16 +36,15 @@
  *   8. the control route addresses a session and the default separately — the
  *      address says which is read or written — and refuses a non-loopback
  *      caller, an unknown mode, a malformed body and a prototype key;
- *   9. only the agents whose effective mode moved are notified, exactly once
- *      per change, no matter whether this plugin, the legacy document or the
- *      loader's volatile-update reported it;
- *  10. a malformed session store degrades to empty instead of failing the
+ *   9. AI approval reviews the actual tool schema and parsed arguments in
+ *      `tools/pre-execute`, accepts only the strict JSON approval protocol, and
+ *      fails closed to a human prompt on denial, malformed output or errors;
+ *  10. mode changes never call `Agent.inject()` or add messages to a session;
+ *  11. a malformed session store degrades to empty instead of failing the
  *      plugin, and a route write that cannot be persisted answers 500;
- *  11. an agent is addressed by its session on BOTH Agent shapes — DSH 0.2.0's
+ *  12. an agent is addressed by its session on BOTH Agent shapes — DSH 0.2.0's
  *      own id, and the older `session` object — and a request carrying neither
- *      resolves to the default instead of throwing;
- *  12. the injected notice is built in-tree: a fresh identity, frozen, and the
- *      same shape the host's own message factory produces.
+ *      resolves to the default instead of throwing.
  *
  * It deliberately does not import index.js as a module without the stubs, needs
  * no browser and no dependencies — "npm run check" is its only caller.
@@ -114,12 +113,6 @@ function object(shape) {
   return self;
 }
 export default { object, union, dict };
-`;
-
-const LLM_STUB = `
-export function createUserMessage(message) {
-  return { ...message, id: "stub-message-id" };
-}
 `;
 
 const STUBS = new Map([
@@ -275,10 +268,11 @@ function boot(options = {}) {
       const off = fn();
       return typeof off === "function" ? off : () => {};
     },
-    on(event, handler, prepend) {
-      subscriptions.push({ event, prepend: prepend === true });
+    on(event, handler, options) {
+      const prepend = options === true || options?.prepend === true;
+      subscriptions.push({ event, prepend });
       const list = listeners.get(event) ?? [];
-      if (prepend === true) list.unshift(handler);
+      if (prepend) list.unshift(handler);
       else list.push(handler);
       listeners.set(event, list);
       return () => {};
@@ -335,6 +329,11 @@ function boot(options = {}) {
       });
       return { outcome, delegated };
     },
+    /** Exercise one tools/pre-execute call and its downstream decision. */
+    async preExecute(exec, downstream = { kind: "allow" }) {
+      const handler = (listeners.get("tools/pre-execute") ?? [])[0];
+      return handler === undefined ? downstream : handler(exec, async () => downstream);
+    },
     /** Whether the answerer was registered ahead of the GUI answerer. */
     answererPrepended: () => subscriptions.some((entry) => entry.event === "approval/request" && entry.prepend === true),
     /** Drive the control route; returns the HTTP status and parsed body. */
@@ -377,22 +376,6 @@ function boot(options = {}) {
 }
 
 /**
- * The session-format V4 admission rule every durable message source must pass.
- *
- * Measured against @deepseek-ai/dsh-session-format-v3-to-v4 0.1.7-rc.1, whose
- * assertV4RowAdmission throws exactly this message for the retired wrapper
- * `{ kind: "plugin", plugin: … }`. Reproduced here so a regression fails
- * offline, where the host would instead fail every later turn of the session.
- * @param message - the message a plugin injected.
- */
-function assertProducerOwnedSource(message) {
-  const source = message === null || message === undefined ? undefined : message.source;
-  if (source === null || typeof source !== "object" || typeof source.kind !== "string" || source.kind.length === 0 || source.kind === "plugin") {
-    throw new Error("format v4 message requires a producer-owned source kind");
-  }
-}
-
-/**
  * A request as the host sends it. DSH 0.2.0 gives an Agent its own id — the
  * session id; older hosts expose the session object instead. Both are exercised.
  */
@@ -413,11 +396,6 @@ function agentOf(sessionId, shape) {
   return shape === "legacy" ? { session: { id: sessionId } } : { id: sessionId };
 }
 
-/** An Agent as `ctx.get("agents").list()` returns it, in the same two shapes. */
-function liveAgent(sessionId, inject, shape = "new") {
-  return { ...agentOf(sessionId, shape), inject };
-}
-
 // ---------------------------------------------------------------------------
 
 console.log("dsh-approval-mode: host contract");
@@ -431,31 +409,6 @@ console.log("dsh-approval-mode: host contract");
   check(field !== undefined, "the plugin declares a Config carrying the default mode");
   check(field?.isVolatile === true, "the default mode is a live (volatile) config field");
   check(field?.fallback() === "ask", "the config field defaults to ask");
-  check(host.MESSAGE_SOURCE?.kind === host.name, "the injected message source carries the plugin's own producer kind");
-}
-
-// 1a: the notice message is built in-tree — identity, shape and immutability.
-{
-  const content = [{ type: "text", text: "hello" }];
-  const message = host.createUserMessage({ content, source: host.MESSAGE_SOURCE });
-  check(message.role === "user", "the built message is a user-role message");
-  check(typeof message.id === "string" && message.id.length > 0, "the built message carries an identity");
-  check(host.createUserMessage({ content, source: host.MESSAGE_SOURCE }).id !== message.id, "every built message gets a fresh identity");
-  check(deepEqual(message.content, content) && message.source?.kind === host.name, "the built message keeps its content and producer source");
-  check(message.id !== content[0] && Object.isFrozen(message) && Object.isFrozen(message.content) && Object.isFrozen(message.content[0]), "the built message is deep-frozen before publication");
-  const input = { content, source: host.MESSAGE_SOURCE };
-  host.createUserMessage(input);
-  check(input.id === undefined && input.role === undefined, "the caller's input object is not mutated");
-  try {
-    assertProducerOwnedSource(message);
-    check(true, "the built message passes session-format v4 source admission");
-  } catch {
-    check(false, "the built message passes session-format v4 source admission");
-  }
-  const cyclic = { content, source: host.MESSAGE_SOURCE };
-  cyclic.self = cyclic;
-  check(host.deepFreeze(cyclic) === cyclic && Object.isFrozen(cyclic) && Object.isFrozen(cyclic.self), "deepFreeze is cycle-safe");
-  check(host.deepFreeze(null) === null && host.deepFreeze(7) === 7, "deepFreeze passes non-objects through");
 }
 
 // 1b: an agent is addressed by its session on both Agent shapes.
@@ -498,9 +451,9 @@ console.log("dsh-approval-mode: host contract");
   check(handed.delegated && handed.outcome === "unavailable", "bypass-except-escalation hands an escalation to the user instead of approving it");
 }
 
-// 3b: LLM mode uses the currently selected model and fails open to the user, not to approval.
+// 3b: AI approval reviews the actual tool call before the GUI approval waterfall.
 {
-  let decision = "APPROVE";
+  let decision = '{"decision":"approve"}';
   const calls = [];
   const ui = boot({
     generation: "forms",
@@ -509,20 +462,29 @@ console.log("dsh-approval-mode: host contract");
     llm: {
       async *stream(options) {
         calls.push(options);
-        yield { type: "text-delta", text: decision };
+        yield { type: "text-delta", index: 0, text: decision };
         yield { type: "finish", reason: { kind: "stop" } };
       }
     }
   });
-  check((await ui.ask(ordinary("s"))).outcome === "allowed-once", "LLM auto mode approves only the exact affirmative response");
-  check(calls[0]?.provider === "test-provider" && calls[0]?.model === "reviewer", "LLM review uses the currently selected default model");
-  decision = "DENY";
-  const rejected = await ui.ask(ordinary("s"));
-  check(rejected.delegated, "an LLM denial is handed to the user for the final decision");
-  decision = "APPROVE\\nexplanation";
-  check((await ui.ask(escalation("s"))).delegated, "non-exact LLM output does not approve a sandbox escalation");
-  decision = "APPROVE";
-  check((await ui.ask(escalation("s"))).outcome === "allowed-once", "an explicit LLM approval can approve escalation requests in LLM mode");
+  const exec = { agent: { id: "s" }, name: "bash", arguments: { command: "true" }, schema: { description: "Run a command", parameters: { type: "object" } }, signal: new AbortController().signal };
+  const approved = await ui.preExecute(exec, { kind: "ask", reason: "tool needs confirmation" });
+  check(approved.kind === "allow", "an affirmative AI review converts the downstream approval ask to allow");
+  check(calls[0]?.provider === "test-provider" && calls[0]?.model === "reviewer", "AI review uses the currently selected default model");
+  check(calls[0]?.messages?.[0]?.content?.[0]?.text?.includes('"command":"true"'), "AI receives the actual parsed tool arguments");
+  check(calls[0]?.system?.includes("untrusted data"), "tool input is explicitly treated as untrusted review data");
+  check((await ui.ask(ordinary("s"))).delegated, "the lower-level approval waterfall remains ordinary if called independently");
+
+  decision = '{"decision":"deny","reason":"not safe"}';
+  const denied = await ui.preExecute(exec, { kind: "allow" });
+  check(denied.kind === "ask", "an AI denial turns an otherwise allowed call into a user confirmation prompt");
+  decision = "not-json";
+  const malformed = await ui.preExecute(exec, { kind: "allow" });
+  check(malformed.kind === "ask", "malformed reviewer output fails closed to a user confirmation");
+
+  decision = '{"decision":"approve"}';
+  const escalated = await ui.preExecute({ ...exec, name: "bash", arguments: { command: "sudo true" } }, { kind: "ask", reason: "sandbox escalation" });
+  check(escalated.kind === "allow", "AI approval can decide escalation asks through the same full-call review");
 }
 
 // 3a: a request whose Agent uses the OLDER shape reaches the same session.
@@ -552,22 +514,16 @@ console.log("dsh-approval-mode: host contract");
   check(effective.status === 200 && effective.body.defaultMode === "bypass", "the route reports the live config default");
 }
 
-// 5: the live reference moves from the HOST side (the settings form's write).
+// 5: live config changes take effect without injecting mode notices into sessions.
 {
   const live = liveRef("ask");
   const ui = boot({ generation: "forms", config: live });
   const injected = [];
-  ui.agents.push(liveAgent("one", (message) => injected.push({ id: "one", message })));
+  ui.agents.push({ id: "one", inject: (message) => injected.push(message) });
   check((await ui.ask(ordinary("one"))).delegated, "the session starts on the default");
   live.set("bypass");
-  ui.emit("loader/volatile-update", [[host.DEFAULT_MODE_FIELD]]);
-  check(injected.length === 1 && injected[0].id === "one", "a host-side config change notifies the sessions that follow the default");
-  check((await ui.ask(escalation("one"))).outcome === "allowed-once", "the moved reference is what the answerer applies");
-  ui.emit("loader/volatile-update", [[host.DEFAULT_MODE_FIELD]]);
-  check(injected.length === 1, "an event that reports no change notifies nobody");
-  ui.emit("loader/volatile-update", [["unrelatedField"]]);
-  ui.emit("settings/updated", "some-other-namespace", {}, {});
-  check(injected.length === 1, "other namespaces and config paths are ignored");
+  check((await ui.ask(escalation("one"))).outcome === "allowed-once", "the moved config reference immediately controls approval behavior");
+  check(injected.length === 0, "approval mode changes never inject messages into the session context");
 }
 
 // 6: the mode is per session, with the default as the fallback.
@@ -695,50 +651,17 @@ console.log("dsh-approval-mode: host contract");
   check(read.body.defaultMode === "bypass", "the legacy document is what a later read answers");
 }
 
-// 14: only the agents whose effective mode moved are notified, exactly once.
+// 14: mode changes never become messages in any Agent's session history.
 {
   const ui = boot({ generation: "legacy", section: { defaultMode: "ask" } });
   const injected = [];
-  ui.agents.push(liveAgent("one", (message) => injected.push({ id: "one", message })));
-  ui.agents.push(liveAgent("two", (message) => injected.push({ id: "two", message })));
-  await ui.request({ method: "POST", url: host.ROUTE_PATH + "?session=one", body: JSON.stringify({ mode: "bypass" }) });
-  check(injected.length === 1 && injected[0].id === "one", "a per-session change notifies that session only");
-  check(injected[0].message?.content?.[0]?.text?.includes("绕过审批"), "the notice states the mode in the user's language");
-  check(typeof injected[0].message?.id === "string" && Object.isFrozen(injected[0].message), "the notice carries a fresh identity and is frozen");
-  check(injected.every((entry) => {
-    try {
-      assertProducerOwnedSource(entry.message);
-      return true;
-    } catch {
-      return false;
-    }
-  }), "the injected notice passes session-format v4 source admission");
-  injected.length = 0;
-  await ui.request({ method: "POST", body: JSON.stringify({ mode: "bypass" }) });
-  check(injected.length === 1 && injected[0].id === "two", "a default change notifies the sessions that follow the default, once");
-  injected.length = 0;
-  await ui.settings.update(host.NS, { defaultMode: "ask" });
-  check(injected.length === 1 && injected[0].id === "two", "a change written straight into the legacy document is observed once");
-}
-{
-  const ui = boot({ generation: "forms", config: liveRef("ask"), localeEntry: { preference: "en" } });
-  const injected = [];
-  ui.agents.push(liveAgent("one", (message) => injected.push({ id: "one", message })));
-  await ui.request({ method: "POST", body: JSON.stringify({ mode: "bypass" }) });
-  check(injected.length === 1, "the route's own default write notifies exactly once (the loader event is not a second notice)");
-  check(injected[0].message?.content?.[0]?.text?.includes("bypass approval"), "the notice follows the locale entry's preference on the new generation");
-  check(injected[0]?.message?.source?.kind === host.MESSAGE_SOURCE.kind, "the 0.1.7+ notice carries the same producer-owned source");
-}
-{
-  const ui = boot({ generation: "forms", config: liveRef("ask") });
-  const injected = [];
-  ui.agents.push(liveAgent("old", (message) => injected.push({ id: "old", message }), "legacy"));
-  ui.agents.push(liveAgent("new", (message) => injected.push({ id: "new", message })));
-  await ui.request({ method: "POST", body: JSON.stringify({ mode: "bypass" }) });
-  check(
-    injected.length === 2 && injected.every((entry) => entry.id === "old" || entry.id === "new"),
-    "a default change notifies both Agent shapes, each for its own session"
-  );
+  ui.agents.push({ id: "one", inject: (message) => injected.push(message) });
+  ui.agents.push({ id: "two", inject: (message) => injected.push(message) });
+  const sessionWrite = await ui.request({ method: "POST", url: host.ROUTE_PATH + "?session=one", body: JSON.stringify({ mode: "llm-auto" }) });
+  const defaultWrite = await ui.request({ method: "POST", body: JSON.stringify({ mode: "bypass" }) });
+  check(sessionWrite.status === 200 && defaultWrite.status === 200, "session and default mode changes still persist");
+  check(injected.length === 0, "mode changes never call Agent.inject or enter session context");
+  check((await ui.request({ url: host.ROUTE_PATH + "?session=one" })).body.mode === "llm-auto", "the UI can read mode state without a session message");
 }
 
 // 15: the store's home resolution.

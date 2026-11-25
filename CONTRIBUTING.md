@@ -29,7 +29,7 @@ dsh-approval-mode/
 ├── icon.svg             # 插件页/插件市场卡片图标（manifest 的 icon）
 ├── locale/en.json       # 插件显示名与描述（en）
 ├── locale/zh.json       # 插件显示名与描述（zh）
-├── index.js             # Host half（审批应答器 + Config/既有 settings 兼容 + 控制路由 + 代理通知）
+├── index.js             # Host half（工具执行前 AI 审批 + 审批应答器 + Config/settings 兼容 + 控制路由）
 ├── lib/client.js        # Client half（工具栏控件 + <=0.1.6 的插件页配置卡片）
 └── scripts/
     ├── dshClient.js     # 轻量 DSH 回环 API 客户端（HTTP + WebSocket，自包含）
@@ -93,9 +93,9 @@ node scripts/check-host.mjs
 放行」，没有任何报错。该脚本用 `module.registerHooks` 为该说明符提供进程内打桩，**并对任何
 `@deepseek-ai/dsh-*` 说明符直接报错**（插件不得依赖带版本号的宿主包；重新引入这类 import 必须
 在这里失败，而不是在用户的 profile 里表现为「插件不兼容」），加载**真实的 `index.js`**，
-并用假的 settings / webServer / agents 上下文断言：
+并用假的 settings / webServer / tools / llm 上下文断言：
 
-1. 模式词汇就是 client 侧提供的三个值，且 `Config` 把默认模式声明成实时（volatile）字段；
+1. 模式词汇就是 client 侧提供的四个值，且 `Config` 把默认模式声明成实时（volatile）字段；
 2. 提权按 `dsh-sandbox` 真正发出的 reason 前缀识别，且不误判普通审批；
 3. 每个模式的应答结果：`ask` 全部委派、两种绕过都自动放行、**只有**
    `bypass-except-escalation` 把提权交回用户；
@@ -108,12 +108,10 @@ node scripts/check-host.mjs
 7. 默认写入按**插件自己的 loader entry id** 走 settings 服务；
 8. 控制路由的地址语义（无 `session` = 默认值，`?session=` = 该会话），
    以及非回环 403、非法 mode 400、坏 JSON 400、非法 session 地址 400、错误方法 405；
-9. 坏会话文件退化为空、写入即修复；宿主侧 live 配置变更只通知一次；
-10. **注入的通知消息带 producer 自有的 source kind**（不是退役的 `{kind:"plugin"}`）——
-    这是会话格式 v4 的写入准入规则，违反它会让该会话之后每一轮都失败（§4.1 的 0.1.5 记录）；
-11. 消息在插件内构造：新标识、深冻结、不改调用方对象，且 `deepFreeze` 对环安全；
-12. Agent 的会话地址按**两种形状**解析（0.2.0 的 `agent.id` 与更早的 `agent.session.id`），
-    两者都拿不到的请求落到默认值而不是抛异常。
+9. AI 审批从 `tools/pre-execute` 收到完整工具名、描述、Schema 和参数；当前默认模型仅在严格 JSON 批准结果时放行，拒绝、错误和无效输出都退回用户；
+10. AI 审批保留下游硬拒绝/取消，并用本次调用审核结果决定是否通过下游人工确认；
+11. 切换默认或会话模式不调用 `Agent.inject()`，不会把审批模式写入会话上下文；
+12. Agent 会话地址兼容 DSH 0.2.0 的 `agent.id` 与更早的 `agent.session.id`；无地址时回落默认模式。
 
 打桩替换的是库，不是被测代码：`index.js` 是磁盘上那一份，只有它的 import 被改写。
 
@@ -131,8 +129,8 @@ node scripts/check-host.mjs
   `ctx.settings.register`（0.1.4 之前的写法），`check-host.mjs` 应报 4 条 `FAIL`，其中
   「a settings service WITHOUT register (0.1.7+) mounts the plugin instead of throwing」
   就是 DSH 0.1.7 上的真实回归；
-- 把注入消息的 `source` 改回 `{ kind: "plugin", plugin: "approval-mode" }`，`check-host.mjs`
-  应报 2 条 `FAIL`（v4 source 准入与 producer kind 一致），这正是 0.1.4 的回归；
+- 恢复对模式切换调用 `Agent.inject()` 的实现，`check-host.mjs` 应在“模式切换永不注入会话”断言处失败；
+- 将 AI reviewer 传入的参数替换成审批原因文本，`check-host.mjs` 应在“AI 收到完整工具参数”断言处失败；
 - 在 `index.js` 里重新 `import` 任意 `@deepseek-ai/dsh-*`（例如 `@deepseek-ai/dsh-llm`），
   `check-host.mjs` 应在加载期直接抛
   `index.js resolved @deepseek-ai/dsh-llm — this plugin must not depend on a versioned @deepseek-ai/dsh-* package`；
@@ -177,8 +175,7 @@ README 只复述结论，判定依据是本表。
 | `react` | `^18.2.0` | client bundle（宿主 seed 模块提供） |
 
 **不声明任何 `@deepseek-ai/dsh-*` peer**（0.2.0 起）：插件的 Host 半只 import
-`@deepseek-ai/schemastery`，注入的通知消息用 `node:crypto` + 本地 `deepFreeze` 自行构造
-（与宿主 `@deepseek-ai/dsh-llm` 的 `createUserMessage` 同形：新 UUID 标识 + 深冻结的 user 消息）。
+`@deepseek-ai/schemastery`，其余能力通过 Cordis 的 `tools/pre-execute`、`approval/request`、`llm` 与 settings 服务运行时接入；审批模式状态不注入 Agent 消息。
 宿主侧 `evaluatePluginCompatibility` 只检查 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 这两个名字，
 声明一个与自己不再有代码关系的包，等于把插件的可用范围绑死在某条 DSH 版本线上——0.2.0 的
 `@deepseek-ai/dsh-llm` 一起步就是 `0.2.0-rc.1`，旧声明因此被判为不兼容（§4.1）。
@@ -189,8 +186,8 @@ settings 服务，且两代契约都兼容——<=0.1.6 的 `register/get/update
 
 ### 3.2 为什么上界不设（以及 0.1.7 / 0.2.0 的教训）
 
-caret 只界到 `0.2.0`，不写显式上界：插件只使用**公开服务**——`settings`、`webServer`、
-`approval/request` 水瀑布、slot 座位——不依赖内部符号。
+caret 只界到 `0.2.0`，不写显式上界：插件只使用**公开服务/事件**——`settings`、`webServer`、
+`tools/pre-execute`、`approval/request` 水瀑布、`llm` 与 Client slot——不依赖内部符号。
 
 但 2026-09 的 DSH 0.1.7 说明「公开」不等于「契约不变」：settings 服务被整体换成
 「插件 `Config` + profile patch 配置表单」，`register`/`get` 消失，旧代码在 `apply` 第一行
