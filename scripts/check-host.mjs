@@ -467,12 +467,15 @@ console.log("dsh-approval-mode: host contract");
       }
     }
   });
-  const exec = { agent: { id: "s" }, name: "bash", arguments: { command: "true" }, schema: { description: "Run a command", parameters: { type: "object" } }, signal: new AbortController().signal };
+  const exec = { callId: "call-safe", agent: { id: "s" }, name: "bash", arguments: { command: "true" }, schema: { description: "Run a command", parameters: { type: "object" } }, signal: new AbortController().signal };
   const approved = await ui.preExecute(exec, { kind: "ask", reason: "tool needs confirmation" });
   check(approved.kind === "allow", "an affirmative AI review converts the downstream approval ask to allow");
   check(calls[0]?.provider === "test-provider" && calls[0]?.model === "reviewer", "AI review uses the currently selected default model");
   check(calls[0]?.messages?.[0]?.content?.[0]?.text?.includes('"command":"true"'), "AI receives the actual parsed tool arguments");
   check(calls[0]?.system?.includes("untrusted data"), "tool input is explicitly treated as untrusted review data");
+  const escalatedRequest = { ...escalation("s"), toolName: "bash", callId: "call-safe" };
+  check((await ui.ask(escalatedRequest)).outcome === "allowed-once", "a sandbox escalation inside that approved tool call uses the same AI decision");
+  check((await ui.ask(escalatedRequest)).delegated, "the AI escalation grant is one-shot and cannot be reused");
   check((await ui.ask(ordinary("s"))).delegated, "the lower-level approval waterfall remains ordinary if called independently");
 
   decision = '{"decision":"deny","reason":"not safe"}';
@@ -483,8 +486,15 @@ console.log("dsh-approval-mode: host contract");
   check(malformed.kind === "ask", "malformed reviewer output fails closed to a user confirmation");
 
   decision = '{"decision":"approve"}';
-  const escalated = await ui.preExecute({ ...exec, name: "bash", arguments: { command: "sudo true" } }, { kind: "ask", reason: "sandbox escalation" });
+  const escalatedExec = { ...exec, callId: "call-escalation", arguments: { command: "sudo true" } };
+  const escalated = await ui.preExecute(escalatedExec, { kind: "ask", reason: "sandbox escalation" });
   check(escalated.kind === "allow", "AI approval can decide escalation asks through the same full-call review");
+  check((await ui.ask({ ...escalation("s"), toolName: "bash", callId: "call-escalation" })).outcome === "allowed-once", "the approved sandbox escalation is granted through approval/request");
+
+  const completedExec = { ...exec, callId: "call-completed" };
+  await ui.preExecute(completedExec, { kind: "ask", reason: "tool needs confirmation" });
+  ui.emit("tools/result", completedExec, { isError: false });
+  check((await ui.ask({ ...escalation("s"), toolName: "bash", callId: "call-completed" })).delegated, "tools/result clears the one-shot AI escalation grant");
 }
 
 // 3a: a request whose Agent uses the OLDER shape reaches the same session.

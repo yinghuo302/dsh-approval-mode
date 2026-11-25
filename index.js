@@ -621,6 +621,43 @@ export function apply(ctx, config) {
     }
   }
 
+  /** One-shot approvals kept only until their tool execution completes. */
+  const pendingAiApprovals = new Map();
+  const AI_APPROVAL_TTL_MS = 5 * 60 * 1000;
+  const MAX_PENDING_AI_APPROVALS = 256;
+
+  function expirePendingAiApprovals(now = Date.now()) {
+    for (const [callId, entry] of pendingAiApprovals) {
+      if (entry.expiresAt <= now) pendingAiApprovals.delete(callId);
+    }
+  }
+
+  function rememberAiApproval(exec, sessionId) {
+    if (typeof exec?.callId !== "string" || exec.callId.length === 0) return false;
+    const now = Date.now();
+    expirePendingAiApprovals(now);
+    if (!pendingAiApprovals.has(exec.callId) && pendingAiApprovals.size >= MAX_PENDING_AI_APPROVALS) return false;
+    pendingAiApprovals.set(exec.callId, {
+      sessionId,
+      toolName: exec.name,
+      expiresAt: now + AI_APPROVAL_TTL_MS
+    });
+    return true;
+  }
+
+  function consumeAiApproval(req, sessionId) {
+    if (typeof req?.callId !== "string") return false;
+    expirePendingAiApprovals();
+    const pending = pendingAiApprovals.get(req.callId);
+    if (pending === undefined) return false;
+    pendingAiApprovals.delete(req.callId);
+    return pending.sessionId === sessionId && pending.toolName === req.toolName;
+  }
+
+  ctx.on("tools/result", (exec) => {
+    if (typeof exec?.callId === "string") pendingAiApprovals.delete(exec.callId);
+  });
+
   /** Review in the pre-execute gate, where exact arguments and schema exist. */
   ctx.on("tools/pre-execute", async (exec, next) => {
     const sessionId = sessionIdOf(exec?.agent);
@@ -633,6 +670,9 @@ export function apply(ctx, config) {
     const downstream = await next();
     if (downstream?.kind === "deny" || downstream?.kind === "cancel") return downstream;
     if (review.decision === "approve") {
+      if (!rememberAiApproval(exec, sessionId)) {
+        console.warn("[dsh-approval-mode] could not retain the one-shot AI approval for possible sandbox escalation");
+      }
       if (downstream?.kind === "ask") {
         console.log(`[dsh-approval-mode] AI approved ${exec?.name ?? "(unknown tool)"} @ ${sessionId ?? "(unknown session)"}`);
         return { kind: "allow" };
@@ -663,6 +703,10 @@ export function apply(ctx, config) {
       const mode = MODES.includes(stored) ? stored : readDefault();
       const tool = req && req.toolName ? req.toolName : "(unknown tool)";
       const at = sessionId ? ` @ ${sessionId}` : "";
+      if (mode === LLM_AUTO && isEscalationRequest(req) && consumeAiApproval(req, sessionId)) {
+        console.log(`[dsh-approval-mode] AI approved sandbox escalation for ${tool}${at}`);
+        return "allowed-once";
+      }
       if (mode === BYPASS) {
         console.log(`[dsh-approval-mode] bypass: auto-approved ${tool}${at}`);
         return "allowed-once";

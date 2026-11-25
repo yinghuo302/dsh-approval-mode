@@ -109,7 +109,7 @@ node scripts/check-host.mjs
 8. 控制路由的地址语义（无 `session` = 默认值，`?session=` = 该会话），
    以及非回环 403、非法 mode 400、坏 JSON 400、非法 session 地址 400、错误方法 405；
 9. AI 审批从 `tools/pre-execute` 收到完整工具名、描述、Schema 和参数；当前默认模型仅在严格 JSON 批准结果时放行，拒绝、错误和无效输出都退回用户；
-10. AI 审批保留下游硬拒绝/取消，并用本次调用审核结果决定是否通过下游人工确认；
+10. AI 审批保留下游硬拒绝/取消，并将批准结果按同一 `callId` 传到工具执行内部的沙箱提权审批（一次性，`tools/result` 清理）；
 11. 切换默认或会话模式不调用 `Agent.inject()`，不会把审批模式写入会话上下文；
 12. Agent 会话地址兼容 DSH 0.2.0 的 `agent.id` 与更早的 `agent.session.id`；无地址时回落默认模式。
 

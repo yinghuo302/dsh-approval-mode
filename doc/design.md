@@ -26,7 +26,7 @@ DSH 的审批系统（`@deepseek-ai/dsh-user-approval`）内置两种会话级�
 | `llm-auto`（AI审批） | `tools/pre-execute` 将工具描述、参数 Schema 与完整参数交给当前默认模型；只有规定的 JSON `approve` 结果放行，其他结果转人工 | 同样由模型评估，可批准或交还用户 |
 | `bypass`（绕过审批） | 自动放行 | 自动放行 |
 
-`llm-auto` 在 `tools/pre-execute` 审查实际工具名、描述、参数 Schema 与完整参数；模型不会收到主会话历史或审批模式设置。工具输入被视为不可信数据；模型服务缺失、超时、拒绝或输出不符合 JSON 决策协议时均退回人工审批。
+`llm-auto` 在 `tools/pre-execute` 审查实际工具名、描述、参数 Schema 与完整参数；模型不会收到主会话历史或审批模式设置。工具输入被视为不可信数据；模型服务缺失、超时、拒绝或输出不符合 JSON 决策协议时均退回人工审批。若已批准的工具执行内部发起沙箱提权，`approval/request` 通过相同 `callId` 消耗该次 AI 批准，`tools/result` 后即清除。
 
 「提权」指 `@deepseek-ai/dsh-sandbox` 的 `approveEscalation()`：受限调用被拒绝后，模型用 `sandbox_permissions` + `justification` 重试同一次调用，请求一次严格更宽的模式。它是唯一会**放宽**沙箱边界的审批，因此单独成一档。
 
