@@ -10,6 +10,36 @@
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-11-25
+
+### 修复
+
+- 保持 DSH 原有审批边界：先执行下游 `tools/pre-execute` gate；只有它原本返回 `ask`，或 Bash 明确请求比当前有效模式更宽的沙箱时，AI reviewer 才介入。相同/更窄的 `sandbox_permissions` 不额外触发 AI 判断，也不被误当作提权。
+
+### 验证
+
+- Host 检查确认相同 `workspace-write` 请求不调用 reviewer，原有 `ask` 和 `danger-full-access` 提权仍可由 AI 审核。
+
+## [0.3.7] - 2026-11-25
+
+### 修复
+
+- AI reviewer 不再拦截 DSH 原本已允许且未请求更宽沙箱的调用；例如当前有效权限为 `workspace-write` 且 `sandbox_permissions` 同为 `workspace-write` 时直接沿用下游决定，不运行 reviewer。只有 DSH 原本会请求审批或明确提出更宽沙箱时，AI 才介入。
+
+### 验证
+
+- Host 测试断言相同 `workspace-write` 请求不会调用 AI reviewer，原有 `ask` 与更宽沙箱请求仍会调用。
+
+## [0.3.6] - 2026-11-25
+
+### 修复
+
+- AI审批只在 DSH 的下游决策为 `ask`，或 Bash 明确请求严格更宽的沙箱模式时调用模型；`sandbox_permissions` 等于/窄于当前有效模式时直接沿用下游决策，不额外触发 AI 审批。
+
+### 验证
+
+- Host 测试覆盖匹配 `workspace-write` 权限时不会调用 reviewer，以及正常 `ask` 和 `danger-full-access` 提权仍会 AI 审核。
+
 ## [0.3.5] - 2026-11-25
 
 ### 变更

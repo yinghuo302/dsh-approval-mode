@@ -654,24 +654,43 @@ export function apply(ctx, config) {
     return pending.sessionId === sessionId && pending.toolName === req.toolName;
   }
 
+  /** Whether an explicit sandbox_permissions asks for a strictly wider mode. */
+  function requestsWiderSandbox(exec) {
+    const requested = exec?.arguments?.sandbox_permissions;
+    const rank = { "read-only": 0, "workspace-write": 1, "danger-full-access": 2 };
+    if (typeof requested !== "string" || !Object.hasOwn(rank, requested)) return false;
+    const sandboxPolicy = ctx.get("sandboxPolicy");
+    if (!sandboxPolicy || typeof sandboxPolicy.resolve !== "function") return true;
+    try {
+      const session = exec?.agent?.session;
+      const effective = sandboxPolicy.resolve(session ? { session } : {}).mode;
+      return !Object.hasOwn(rank, effective) || rank[requested] > rank[effective];
+    } catch (err) {
+      console.error("[dsh-approval-mode] could not resolve the effective sandbox mode; reviewing the requested mode conservatively:", err);
+      return true;
+    }
+  }
+
   ctx.on("tools/result", (exec) => {
     if (typeof exec?.callId === "string") pendingAiApprovals.delete(exec.callId);
   });
 
-  /** Review in the pre-execute gate, where exact arguments and schema exist. */
+  /** Review only calls that DSH would otherwise ask about or that widen sandbox access. */
   ctx.on("tools/pre-execute", async (exec, next) => {
     const sessionId = sessionIdOf(exec?.agent);
     const stored = sessionModes.get(sessionId);
     const mode = MODES.includes(stored) ? stored : readDefault();
-    if (mode !== LLM_AUTO) return next();
+    const downstream = await next();
+    if (mode !== LLM_AUTO || downstream?.kind === "deny" || downstream?.kind === "cancel") return downstream;
+
+    const sandboxEscalation = requestsWiderSandbox(exec);
+    if (downstream?.kind !== "ask" && !sandboxEscalation) return downstream;
 
     const review = await reviewToolExecution(exec);
     if (exec?.signal?.aborted) return { kind: "cancel" };
-    const downstream = await next();
-    if (downstream?.kind === "deny" || downstream?.kind === "cancel") return downstream;
     if (review.decision === "approve") {
-      if (!rememberAiApproval(exec, sessionId)) {
-        console.warn("[dsh-approval-mode] could not retain the one-shot AI approval for possible sandbox escalation");
+      if (sandboxEscalation && !rememberAiApproval(exec, sessionId)) {
+        console.warn("[dsh-approval-mode] could not retain the one-shot AI approval for sandbox escalation");
       }
       if (downstream?.kind === "ask") {
         console.log(`[dsh-approval-mode] AI approved ${exec?.name ?? "(unknown tool)"} @ ${sessionId ?? "(unknown session)"}`);

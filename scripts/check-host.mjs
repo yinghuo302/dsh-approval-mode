@@ -280,6 +280,7 @@ function boot(options = {}) {
     get(name) {
       if (name === "llm") return options.llm;
       if (name === "agentDefaultModel") return options.agentDefaultModel;
+      if (name === "sandboxPolicy") return options.sandboxPolicy;
       if (name === "agents") return { list: () => agents };
       if (name === "dshHomePath") return (...segments) => path.join(home, ...segments);
       if (name === "configEditor") return configEditor;
@@ -451,7 +452,7 @@ console.log("dsh-approval-mode: host contract");
   check(handed.delegated && handed.outcome === "unavailable", "bypass-except-escalation hands an escalation to the user instead of approving it");
 }
 
-// 3b: AI approval reviews the actual tool call before the GUI approval waterfall.
+// 3b: AI review replaces only an existing ask or a strictly wider sandbox request.
 {
   let decision = '{"decision":"approve"}';
   const calls = [];
@@ -459,6 +460,7 @@ console.log("dsh-approval-mode: host contract");
     generation: "forms",
     config: liveRef("llm-auto"),
     agentDefaultModel: { currentSelection: () => ({ provider: "test-provider", model: "reviewer" }) },
+    sandboxPolicy: { resolve: () => ({ mode: "workspace-write" }) },
     llm: {
       async *stream(options) {
         calls.push(options);
@@ -468,24 +470,24 @@ console.log("dsh-approval-mode: host contract");
     }
   });
   const exec = { callId: "call-safe", agent: { id: "s" }, name: "bash", arguments: { command: "true" }, schema: { description: "Run a command", parameters: { type: "object" } }, signal: new AbortController().signal };
+  const callsBeforeSameMode = calls.length;
+  const sameModeCall = { ...exec, callId: "same-mode", arguments: { command: "true", sandbox_permissions: "workspace-write" } };
+  const sameMode = await ui.preExecute(sameModeCall, { kind: "allow" });
+  check(sameMode.kind === "allow" && calls.length === callsBeforeSameMode, "a workspace-write request matching the effective mode neither escalates nor invokes AI approval");
   const approved = await ui.preExecute(exec, { kind: "ask", reason: "tool needs confirmation" });
   check(approved.kind === "allow", "an affirmative AI review converts the downstream approval ask to allow");
   check(calls[0]?.provider === "test-provider" && calls[0]?.model === "reviewer", "AI review uses the currently selected default model");
   check(calls[0]?.messages?.[0]?.content?.[0]?.text?.includes('"command":"true"'), "AI receives the actual parsed tool arguments");
   check(calls[0]?.system?.includes("untrusted data"), "tool input is explicitly treated as untrusted review data");
-  const escalatedRequest = { ...escalation("s"), toolName: "bash", callId: "call-safe" };
-  check((await ui.ask(escalatedRequest)).outcome === "allowed-once", "a sandbox escalation inside that approved tool call uses the same AI decision");
-  const repeated = await ui.ask(escalatedRequest);
-  check(repeated.outcome === "rejected" && !repeated.delegated, "the AI escalation grant is one-shot and a repeated request is rejected without GUI approval");
   const unreviewed = await ui.ask(ordinary("s"));
   check(unreviewed.outcome === "rejected" && !unreviewed.delegated, "an unreviewed approval request in AI mode is rejected rather than delegated");
 
   decision = '{"decision":"deny","reason":"not safe"}';
-  const denied = await ui.preExecute(exec, { kind: "allow" });
-  check(denied.kind === "deny", "an AI denial directly rejects an otherwise allowed call");
+  const denied = await ui.preExecute(exec, { kind: "ask", reason: "native approval required" });
+  check(denied.kind === "deny", "an AI denial directly rejects a call DSH would otherwise ask about");
   decision = "not-json";
-  const malformed = await ui.preExecute(exec, { kind: "allow" });
-  check(malformed.kind === "deny", "malformed reviewer output fails closed by rejecting the call");
+  const malformed = await ui.preExecute(exec, { kind: "ask", reason: "native approval required" });
+  check(malformed.kind === "deny", "malformed reviewer output fails closed by rejecting a call DSH would otherwise ask about");
 
   decision = '{"decision":"approve"}';
   const escalatedExec = {
@@ -500,13 +502,16 @@ console.log("dsh-approval-mode: host contract");
   const escalated = await ui.preExecute(escalatedExec, { kind: "ask", reason: "sandbox escalation" });
   check(escalated.kind === "allow", "AI approval can decide a danger-full-access escalation through the full-call review");
   check(calls.at(-1)?.messages?.[0]?.content?.[0]?.text?.includes('"sandbox_permissions":"danger-full-access"'), "the reviewer sees the exact requested full-access mode");
-  check((await ui.ask({ ...escalation("s"), toolName: "bash", callId: "call-escalation" })).outcome === "allowed-once", "the approved sandbox escalation is granted through approval/request");
+  const fullAccessApproval = { ...escalation("s"), toolName: "bash", callId: "call-escalation" };
+  check((await ui.ask(fullAccessApproval)).outcome === "allowed-once", "the approved sandbox escalation is granted through approval/request");
+  const repeatedFullAccess = await ui.ask(fullAccessApproval);
+  check(repeatedFullAccess.outcome === "rejected" && !repeatedFullAccess.delegated, "the full-access grant is one-shot and not delegated to a human");
 
-  const completedExec = { ...exec, callId: "call-completed" };
-  await ui.preExecute(completedExec, { kind: "ask", reason: "tool needs confirmation" });
+  const completedExec = { ...exec, callId: "call-completed", arguments: { command: "true", sandbox_permissions: "danger-full-access", justification: "test" } };
+  await ui.preExecute(completedExec, { kind: "allow" });
   ui.emit("tools/result", completedExec, { isError: false });
   const expiredGrant = await ui.ask({ ...escalation("s"), toolName: "bash", callId: "call-completed" });
-  check(expiredGrant.outcome === "rejected" && !expiredGrant.delegated, "tools/result clears the one-shot AI grant and unmatched escalation is denied");
+  check(expiredGrant.outcome === "rejected" && !expiredGrant.delegated, "tools/result clears the one-shot AI grant and unmatched escalation is rejected");
 }
 {
   const ui = boot({ generation: "forms", config: liveRef("llm-auto") });
