@@ -486,9 +486,18 @@ console.log("dsh-approval-mode: host contract");
   check(malformed.kind === "ask", "malformed reviewer output fails closed to a user confirmation");
 
   decision = '{"decision":"approve"}';
-  const escalatedExec = { ...exec, callId: "call-escalation", arguments: { command: "sudo true" } };
+  const escalatedExec = {
+    ...exec,
+    callId: "call-escalation",
+    arguments: {
+      command: "true",
+      sandbox_permissions: "danger-full-access",
+      justification: "Test the AI full-access decision using a no-op command; no files or external effects."
+    }
+  };
   const escalated = await ui.preExecute(escalatedExec, { kind: "ask", reason: "sandbox escalation" });
-  check(escalated.kind === "allow", "AI approval can decide escalation asks through the same full-call review");
+  check(escalated.kind === "allow", "AI approval can decide a danger-full-access escalation through the full-call review");
+  check(calls.at(-1)?.messages?.[0]?.content?.[0]?.text?.includes('"sandbox_permissions":"danger-full-access"'), "the reviewer sees the exact requested full-access mode");
   check((await ui.ask({ ...escalation("s"), toolName: "bash", callId: "call-escalation" })).outcome === "allowed-once", "the approved sandbox escalation is granted through approval/request");
 
   const completedExec = { ...exec, callId: "call-completed" };

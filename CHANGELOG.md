@@ -10,6 +10,16 @@
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-25
+
+### 修复
+
+- 明确 AI审批策略可评估并批准 `workspace-write` 到 `danger-full-access` 的一次性提权；只有完整调用清楚且确实需要更宽权限时才放行，不能仅因请求提权就自动批准。
+
+### 验证
+
+- Host 测试覆盖完整请求携带 `sandbox_permissions: danger-full-access` 与 `justification`，并贯通到一次性提权批准。
+
 ## [0.3.2] - 2026-11-25
 
 ### 修复
