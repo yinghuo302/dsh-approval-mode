@@ -26,7 +26,7 @@ DSH 的审批系统（`@deepseek-ai/dsh-user-approval`）内置两种会话级�
 | `llm-auto`（AI审批） | 仅当 DSH 下游为 `ask` 时调用模型；仅规定的 JSON `approve` 结果放行，其他结果直接拒绝 | Bash 请求更宽模式时由模型判定；相同/更窄权限不触发升级审核；仅匹配 AI 已批准 `callId` 的请求放行 |
 | `bypass`（绕过审批） | 自动放行 | 自动放行 |
 
-`llm-auto` 在 `tools/pre-execute` 先运行 DSH 下游 gate。若 gate 为 `allow` 且请求未严格扩大 sandbox mode，直接沿用 DSH 决策，不调用 AI；若下游为 `ask` 或 Bash 请求更宽权限，才将工具名、描述、Schema 和完整参数交给当前模型审查。模型不会收到主会话历史或审批模式设置。工具输入被视为不可信数据；模型服务缺失、超时、拒绝或输出不符合 JSON 决策协议时均直接拒绝工具调用。若已批准的工具执行内部发起沙箱提权，`approval/request` 通过相同 `callId` 消耗该次 AI 批准，`tools/result` 后即清除；没有匹配审批记录的请求直接拒绝。
+`llm-auto` 在 `tools/pre-execute` 先运行 DSH 下游 gate。若 gate 为 `allow` 且请求未严格扩大 sandbox mode，直接沿用 DSH 决策，不调用 AI；若下游为 `ask` 或 Bash 请求更宽权限，才将工具名、描述、Schema 和完整参数交给当前模型审查。普通工具审核不会收到主会话历史或审批模式设置；仅 `plugin_manager` 审核会附带当前会话最近最多 3 条、每条限长的直接用户消息，以判断操作是否符合用户意图，不包含助手/工具/注入消息，也不写入审批历史。工具输入仍视为不可信数据；模型服务缺失、超时、拒绝或输出不符合 JSON 决策协议时均直接拒绝工具调用。若已批准的工具执行内部发起沙箱提权，`approval/request` 通过相同 `callId` 消耗该次 AI 批准，`tools/result` 后即清除；没有匹配审批记录的请求直接拒绝。
 
 「提权」指 `@deepseek-ai/dsh-sandbox` 的 `approveEscalation()`：受限调用被拒绝后，模型用 `sandbox_permissions` + `justification` 重试同一次调用，请求一次严格更宽的模式。它是唯一会**放宽**沙箱边界的审批，因此单独成一档。
 
