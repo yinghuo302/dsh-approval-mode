@@ -339,8 +339,14 @@ function boot(options = {}) {
     answererPrepended: () => subscriptions.some((entry) => entry.event === "approval/request" && entry.prepend === true),
     /** Drive the control route; returns the HTTP status and parsed body. */
     async request({ method = "GET", url = host.ROUTE_PATH, host: hostHeader = "127.0.0.1:43120", body = "" } = {}) {
-      const route = routes[0];
-      if (route === undefined) throw new Error("no control route registered");
+      let pathname;
+      try {
+        pathname = new URL(url, "http://localhost").pathname;
+      } catch {
+        throw new Error("invalid route URL");
+      }
+      const route = routes.find((candidate) => candidate.path === pathname);
+      if (route === undefined) throw new Error("no matching control route registered");
       const handlers = {};
       let flushed = false;
       const flush = () => {
@@ -412,6 +418,15 @@ console.log("dsh-approval-mode: host contract");
   check(field?.fallback() === "ask", "the config field defaults to ask");
 }
 
+// 1a: history sanitization removes credentials and bounds model/tool payloads.
+{
+  const safe = host.sanitizeAiHistoryValue({ apiKey: "sk-secret", nested: { password: "hunter2" }, command: "curl -H 'Authorization: Bearer abc123' https://example.invalid" });
+  check(safe.apiKey === "[REDACTED]" && safe.nested.password === "[REDACTED]", "sensitive history fields are redacted by key");
+  check(safe.command.includes("[REDACTED]") && !safe.command.includes("abc123"), "bearer credentials embedded in command text are redacted");
+  check(host.sanitizeAiHistoryValue("x".repeat(5000)).length < 4100, "history strings are length bounded");
+  check(host.parseAiHistoryDocument("not-json").length === 0, "a malformed history store degrades to an empty list");
+}
+
 // 1b: an agent is addressed by its session on both Agent shapes.
 {
   check(host.sessionIdOf({ id: "session-1" }) === "session-1", "DSH 0.2.0's Agent carries the session id as its own id");
@@ -479,6 +494,9 @@ console.log("dsh-approval-mode: host contract");
   check(calls[0]?.provider === "test-provider" && calls[0]?.model === "reviewer", "AI review uses the currently selected default model");
   check(calls[0]?.messages?.[0]?.content?.[0]?.text?.includes('"command":"true"'), "AI receives the actual parsed tool arguments");
   check(calls[0]?.system?.includes("untrusted data"), "tool input is explicitly treated as untrusted review data");
+  const firstHistory = await ui.request({ url: host.AI_HISTORY_ROUTE_PATH + "?session=s" });
+  check(firstHistory.status === 200 && firstHistory.body.entries[0]?.decision === "approved", "AI approval decisions are persisted and queryable for this session");
+  check(firstHistory.body.entries[0]?.arguments?.command === "true", "the history view retains detailed redacted call arguments");
   const unreviewed = await ui.ask(ordinary("s"));
   check(unreviewed.outcome === "rejected" && !unreviewed.delegated, "an unreviewed approval request in AI mode is rejected rather than delegated");
 
@@ -504,6 +522,8 @@ console.log("dsh-approval-mode: host contract");
   check(calls.at(-1)?.messages?.[0]?.content?.[0]?.text?.includes('"sandbox_permissions":"danger-full-access"'), "the reviewer sees the exact requested full-access mode");
   const fullAccessApproval = { ...escalation("s"), toolName: "bash", callId: "call-escalation" };
   check((await ui.ask(fullAccessApproval)).outcome === "allowed-once", "the approved sandbox escalation is granted through approval/request");
+  const escalationHistory = await ui.request({ url: host.AI_HISTORY_ROUTE_PATH + "?session=s" });
+  check(escalationHistory.body.entries.some((entry) => entry.kind === "sandbox-escalation" && entry.decision === "approved"), "the AI-granted full-access request appears in history");
   const repeatedFullAccess = await ui.ask(fullAccessApproval);
   check(repeatedFullAccess.outcome === "rejected" && !repeatedFullAccess.delegated, "the full-access grant is one-shot and not delegated to a human");
 
@@ -635,7 +655,7 @@ console.log("dsh-approval-mode: host contract");
 // 11: a host with no settings service at all.
 {
   const ui = boot({ generation: "none", config: liveRef("bypass-except-escalation") });
-  check(ui.routes.length === 1, "the control route is registered with no settings service");
+  check(ui.routes.length === 2, "the control route is registered with no settings service");
   check((await ui.ask(ordinary("s"))).outcome === "allowed-once", "the answerer works with no settings service");
   const read = await ui.request();
   check(read.status === 200 && read.body.defaultMode === "bypass-except-escalation", "the route answers from the config value");
@@ -672,7 +692,7 @@ console.log("dsh-approval-mode: host contract");
   check((await ui.request({ url: host.ROUTE_PATH + "?session=one" })).body.mode === "bypass-except-escalation", "writing the default leaves a session's own mode alone");
   const sameDefault = await ui.request({ method: "POST", body: JSON.stringify({ mode: "ask" }) });
   check(sameDefault.body.changed === false && ui.configUpdates.length === 1, "rewriting the same default is a no-op");
-  check(ui.routes.length === 1, "the route is registered exactly once");
+  check(ui.routes.length === 2, "the route is registered exactly once");
   const emptySession = await ui.request({ url: host.ROUTE_PATH + "?session=" });
   check(emptySession.body.mode === "ask" && emptySession.body.session === undefined, "an empty session parameter addresses the default");
   const poisoned = await ui.request({ url: host.ROUTE_PATH + "?session=__proto__" });

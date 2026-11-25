@@ -9,9 +9,10 @@
  *     mode delegates to DSH's ordinary click-to-approve flow.
  *   - Modes include `ask`, `llm-auto`, `bypass-except-escalation` and `bypass`.
  *     `llm-auto` reviews the complete tool call in `tools/pre-execute`, where
- *     the schema and arguments are available; a denial or review failure asks
- *     the user. Mode changes are plugin state only and are never injected into
- *     the Agent's conversation.
+ *     the schema and arguments are available; a denial or review failure
+ *     rejects the call. Decisions are recorded in a local, redacted history
+ *     view. Mode changes remain plugin state and are never injected into the
+ *     Agent's conversation.
  *   - The escalation carve-out mode auto-approves ordinary calls but hands a
  *     sandbox escalation — a one-shot widening that lets a file operation or
  *     command leave the workspace — back to the GUI answerer.
@@ -47,6 +48,7 @@
  * imports. Host Services are obtained from Cordis at runtime; no versioned
  * `@deepseek-ai/dsh-*` package is declared or resolved.
  */
+import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -161,6 +163,18 @@ export const SESSION_STORE_FILE = "sessions.json";
 
 /** Format version of the session store document. */
 export const SESSION_STORE_VERSION = 1;
+
+/** Read-only HTTP route used by the local approval-history view. */
+export const AI_HISTORY_ROUTE_PATH = `${ROUTE_PATH}/history`;
+
+/** File holding the bounded, secret-redacted AI decision history. */
+export const AI_HISTORY_FILE = "ai-approval-history.json";
+
+/** Maximum retained decision records per DSH profile. */
+export const AI_HISTORY_MAX_ENTRIES = 500;
+
+/** Maximum number of history records returned in one HTTP response. */
+export const AI_HISTORY_PAGE_MAX = 100;
 
 /**
  * Session addresses this route and the store refuse. A session id becomes the
@@ -280,6 +294,46 @@ export function sessionStorePath(ctx) {
   const configured = typeof process.env.DSH_HOME === "string" ? process.env.DSH_HOME.trim() : "";
   const home = configured.length > 0 ? configured : join(homedir(), ".dsh");
   return join(home, SESSION_STORE_DIR, SESSION_STORE_FILE);
+}
+
+/** Absolute path of this plugin's bounded AI-review history file. */
+export function aiHistoryPath(ctx) {
+  return join(dirname(sessionStorePath(ctx)), AI_HISTORY_FILE);
+}
+
+const SECRET_HISTORY_KEY = /(password|passphrase|secret|token|api[_-]?key|authorization|cookie|credential|private[_-]?key)/i;
+
+/** Redact likely credentials and bound arbitrary tool payload before persistence. */
+export function sanitizeAiHistoryValue(value, key = "", depth = 0) {
+  if (SECRET_HISTORY_KEY.test(key)) return "[REDACTED]";
+  if (depth > 8) return "[TRUNCATED]";
+  if (typeof value === "string") {
+    const redacted = value
+      .replace(/(Bearer\s+)[A-Za-z0-9._~+\/-]+/gi, "$1[REDACTED]")
+      .replace(/((?:api[_-]?key|token|secret|password|authorization|cookie|credential)\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)/gi, "$1[REDACTED]");
+    return redacted.length > 4000 ? `${redacted.slice(0, 4000)}…[TRUNCATED]` : redacted;
+  }
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (Array.isArray(value)) return value.slice(0, 40).map((entry) => sanitizeAiHistoryValue(entry, "", depth + 1));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).slice(0, 60).map(([childKey, child]) => [
+      childKey,
+      sanitizeAiHistoryValue(child, childKey, depth + 1)
+    ]));
+  }
+  return String(value);
+}
+
+/** Parse the plugin-owned history document fail-closed. */
+export function parseAiHistoryDocument(value) {
+  let parsed;
+  try {
+    parsed = typeof value === "string" ? JSON.parse(value) : value;
+  } catch {
+    return [];
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || !Array.isArray(parsed.entries)) return [];
+  return parsed.entries.filter((entry) => entry !== null && typeof entry === "object" && !Array.isArray(entry));
 }
 
 /**
@@ -540,6 +594,90 @@ export function apply(ctx, config) {
     return { defaultMode: readDefault(), sessions: sessionModes.entries() };
   }
 
+  function loadAiHistory() {
+    try {
+      return parseAiHistoryDocument(readFileSync(aiHistoryPath(ctx), "utf8"));
+    } catch (err) {
+      if (err?.code !== "ENOENT") console.error("[dsh-approval-mode] could not read AI approval history:", err);
+      return [];
+    }
+  }
+
+  /** Append a bounded, redacted decision record without blocking authorization. */
+  function appendAiHistory(value) {
+    const file = aiHistoryPath(ctx);
+    const parent = dirname(file);
+    let temporary = null;
+    try {
+      const entries = loadAiHistory();
+      const record = {
+        id: randomUUID(),
+        timestamp: new Date().toISOString(),
+        ...sanitizeAiHistoryValue(value)
+      };
+      entries.push(record);
+      const document = { version: 1, entries: entries.slice(-AI_HISTORY_MAX_ENTRIES) };
+      mkdirSync(parent, { recursive: true, mode: 0o700 });
+      temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+      writeFileSync(temporary, `${JSON.stringify(document, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      renameSync(temporary, file);
+      return record.id;
+    } catch (err) {
+      if (temporary !== null) {
+        try { unlinkSync(temporary); } catch { /* best effort cleanup */ }
+      }
+      console.error("[dsh-approval-mode] could not persist AI approval history:", err);
+      return null;
+    }
+  }
+
+  function queryAiHistory(sessionId, limit, offset) {
+    const all = loadAiHistory();
+    const matching = sessionId === null ? all : all.filter((entry) => entry.sessionId === sessionId);
+    matching.sort((left, right) => String(right.timestamp ?? "").localeCompare(String(left.timestamp ?? "")));
+    const entries = matching.slice(offset, offset + limit);
+    return {
+      entries,
+      total: matching.length,
+      nextOffset: offset + entries.length < matching.length ? offset + entries.length : null
+    };
+  }
+
+  function effectiveSandboxMode(exec) {
+    const sandboxPolicy = ctx.get("sandboxPolicy");
+    if (!sandboxPolicy || typeof sandboxPolicy.resolve !== "function") return null;
+    try {
+      const session = exec?.agent?.session;
+      const mode = sandboxPolicy.resolve(session ? { session } : {}).mode;
+      return typeof mode === "string" ? mode : null;
+    } catch (err) {
+      console.error("[dsh-approval-mode] could not resolve the effective sandbox mode:", err);
+      return null;
+    }
+  }
+
+  function recordAiReview(exec, sessionId, review, trigger) {
+    const selector = ctx.get("agentDefaultModel");
+    let model = null;
+    try {
+      model = typeof selector?.currentSelection === "function" ? selector.currentSelection() : null;
+    } catch { /* reviewer status is more important than optional model metadata */ }
+    return appendAiHistory({
+      kind: "review",
+      decision: review.decision === "approve" ? "approved" : review.decision === "deny" ? "denied" : "unavailable",
+      trigger,
+      sessionId: typeof sessionId === "string" ? sessionId : null,
+      callId: typeof exec?.callId === "string" ? exec.callId : null,
+      toolName: typeof exec?.name === "string" ? exec.name : "unknown",
+      toolDescription: typeof exec?.schema?.description === "string" ? exec.schema.description : "",
+      arguments: exec?.arguments ?? null,
+      requestedSandboxMode: typeof exec?.arguments?.sandbox_permissions === "string" ? exec.arguments.sandbox_permissions : null,
+      effectiveSandboxMode: effectiveSandboxMode(exec),
+      model: model && typeof model === "object" ? { provider: model.provider ?? null, model: model.model ?? null } : null,
+      reason: typeof review.reason === "string" ? review.reason : review.decision === "approve" ? "Explicit AI approval" : "AI review did not produce an approval"
+    });
+  }
+
   // Approval modes are plugin state only. Never inject mode changes into an
   // Agent: doing so would make this UI preference visible in its conversation.
   console.log(`[dsh-approval-mode] loaded: default mode = ${readDefault()}`);
@@ -632,7 +770,7 @@ export function apply(ctx, config) {
     }
   }
 
-  function rememberAiApproval(exec, sessionId) {
+  function rememberAiApproval(exec, sessionId, historyId) {
     if (typeof exec?.callId !== "string" || exec.callId.length === 0) return false;
     const now = Date.now();
     expirePendingAiApprovals(now);
@@ -640,18 +778,19 @@ export function apply(ctx, config) {
     pendingAiApprovals.set(exec.callId, {
       sessionId,
       toolName: exec.name,
+      historyId,
       expiresAt: now + AI_APPROVAL_TTL_MS
     });
     return true;
   }
 
   function consumeAiApproval(req, sessionId) {
-    if (typeof req?.callId !== "string") return false;
+    if (typeof req?.callId !== "string") return null;
     expirePendingAiApprovals();
     const pending = pendingAiApprovals.get(req.callId);
-    if (pending === undefined) return false;
+    if (pending === undefined) return null;
     pendingAiApprovals.delete(req.callId);
-    return pending.sessionId === sessionId && pending.toolName === req.toolName;
+    return pending.sessionId === sessionId && pending.toolName === req.toolName ? pending : null;
   }
 
   /** Whether an explicit sandbox_permissions asks for a strictly wider mode. */
@@ -659,16 +798,8 @@ export function apply(ctx, config) {
     const requested = exec?.arguments?.sandbox_permissions;
     const rank = { "read-only": 0, "workspace-write": 1, "danger-full-access": 2 };
     if (typeof requested !== "string" || !Object.hasOwn(rank, requested)) return false;
-    const sandboxPolicy = ctx.get("sandboxPolicy");
-    if (!sandboxPolicy || typeof sandboxPolicy.resolve !== "function") return true;
-    try {
-      const session = exec?.agent?.session;
-      const effective = sandboxPolicy.resolve(session ? { session } : {}).mode;
-      return !Object.hasOwn(rank, effective) || rank[requested] > rank[effective];
-    } catch (err) {
-      console.error("[dsh-approval-mode] could not resolve the effective sandbox mode; reviewing the requested mode conservatively:", err);
-      return true;
-    }
+    const effective = effectiveSandboxMode(exec);
+    return effective === null || !Object.hasOwn(rank, effective) || rank[requested] > rank[effective];
   }
 
   ctx.on("tools/result", (exec) => {
@@ -694,8 +825,10 @@ export function apply(ctx, config) {
 
     const review = await reviewToolExecution(exec);
     if (exec?.signal?.aborted) return { kind: "cancel" };
+    const trigger = downstream?.kind === "ask" ? "approval-request" : sandboxEscalation ? "sandbox-escalation" : "internal-approval";
+    const historyId = recordAiReview(exec, sessionId, review, trigger);
     if (review.decision === "approve") {
-      if ((sandboxEscalation || internalApproval) && !rememberAiApproval(exec, sessionId)) {
+      if ((sandboxEscalation || internalApproval) && !rememberAiApproval(exec, sessionId, historyId)) {
         console.warn("[dsh-approval-mode] could not retain the one-shot AI approval for an internal approval request");
       }
       if (downstream?.kind === "ask") {
@@ -728,7 +861,19 @@ export function apply(ctx, config) {
       const tool = req && req.toolName ? req.toolName : "(unknown tool)";
       const at = sessionId ? ` @ ${sessionId}` : "";
       if (mode === LLM_AUTO) {
-        if (isEscalationRequest(req) && consumeAiApproval(req, sessionId)) {
+        const escalationApproval = isEscalationRequest(req) ? consumeAiApproval(req, sessionId) : null;
+        if (escalationApproval) {
+          const requestedSandboxMode = /^escalate sandbox to ([^:]+):/i.exec(String(req?.reason ?? ""))?.[1] ?? null;
+          appendAiHistory({
+            kind: "sandbox-escalation",
+            decision: "approved",
+            sessionId,
+            callId: typeof req?.callId === "string" ? req.callId : null,
+            toolName: tool,
+            requestedSandboxMode,
+            reason: typeof req?.reason === "string" ? req.reason : "",
+            linkedReviewId: escalationApproval.historyId ?? null
+          });
           console.log(`[dsh-approval-mode] AI approved sandbox escalation for ${tool}${at}`);
           return "allowed-once";
         }
@@ -856,4 +1001,43 @@ export function apply(ctx, config) {
       writeJson(200, { ok: true, mode, defaultMode: after.defaultMode, changed: true });
     }
   }), "dsh-approval-mode: control route");
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: "exact",
+    path: AI_HISTORY_ROUTE_PATH,
+    handler: async (req, res) => {
+      const writeJson = (status, body) => {
+        res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(body));
+      };
+      if (!isLoopbackRequest(req)) {
+        writeJson(403, { ok: false, error: "forbidden" });
+        return;
+      }
+      if (req.method !== "GET") {
+        writeJson(405, { ok: false, error: "method-not-allowed" });
+        return;
+      }
+      let url;
+      try {
+        url = new URL(req.url ?? AI_HISTORY_ROUTE_PATH, "http://localhost");
+      } catch {
+        writeJson(400, { ok: false, error: "bad-url" });
+        return;
+      }
+      const addressed = url.searchParams.get("session");
+      const session = addressed === null || addressed.length === 0 ? null : addressed;
+      if (session !== null && !isSessionAddress(session)) {
+        writeJson(400, { ok: false, error: "invalid-session" });
+        return;
+      }
+      const limit = Number(url.searchParams.get("limit") ?? "25");
+      const offset = Number(url.searchParams.get("offset") ?? "0");
+      if (!Number.isInteger(limit) || limit < 1 || limit > AI_HISTORY_PAGE_MAX || !Number.isInteger(offset) || offset < 0) {
+        writeJson(400, { ok: false, error: "invalid-pagination" });
+        return;
+      }
+      writeJson(200, { ok: true, ...queryAiHistory(session, limit, offset) });
+    }
+  }), "dsh-approval-mode: AI history route");
 }

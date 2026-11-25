@@ -39,6 +39,7 @@ const source = readFileSync(path.join(root, "lib", "client.js"), "utf8");
 
 const NS = "approval-mode";
 const ROUTE = "/approval-mode";
+const HISTORY_ROUTE = "/approval-mode/history";
 const SELECT_SLOT = "conversation.input.left";
 const CARD_SLOT = "settings.plugin.item";
 /** The session the picker seat belongs to; the Host address is derived from it. */
@@ -309,12 +310,29 @@ console.log("dsh-approval-mode: client bundle contract");
   check(requests.some((entry) => entry.url === SESSION_ROUTE), "the picker reads the SESSION address");
 
   const menuitems = findBy(menu, (node) => node.props?.role === "menuitem");
-  check(menuitems.length === 4, "the picker offers exactly four modes");
+  check(menuitems.length === 5, "the picker offers four modes and the AI approval history action");
   menuitem(menu, ui.dictionaries[NS].zh["item.bypass"])?.props?.onClick?.();
   await tick();
   const post = requests.find((entry) => entry.method === "POST");
   check(post !== undefined && post.url === SESSION_ROUTE, "the picker writes the SESSION address");
   check(post !== undefined && post.body === JSON.stringify({ mode: "bypass" }), "the picker POST body carries the chosen mode");
+}
+
+// 5a: the history action reads only the current session's local audit records.
+{
+  const { requests, fetchImpl } = recorder((entry) => {
+    if (entry.url.startsWith(HISTORY_ROUTE)) return okJson({ ok: true, entries: [{ id: "review-1", toolName: "bash", decision: "approved" }], total: 1, nextOffset: null });
+    return okJson({ ok: true, mode: "llm-auto" });
+  });
+  const ui = boot({ withSettingsScope: true, fetchImpl });
+  const menu = ui.render(SELECT_SLOT, [undefined, true]);
+  menuitem(menu, ui.dictionaries[NS].zh["history.open"])?.props?.onClick?.();
+  await tick();
+  const historyRead = requests.find((entry) => entry.url.startsWith(HISTORY_ROUTE));
+  check(historyRead?.method === "GET", "opening AI approval history performs a read-only GET");
+  check(historyRead?.url.includes("session=session-1"), "history lookup is scoped to the current session");
+  const historyKeys = ["history.open", "history.title", "history.close", "history.refresh", "history.more", "history.loading", "history.empty", "history.error", "history.approved", "history.denied", "history.unavailable", "history.escalation", "history.callDetails", "history.requestedMode", "history.timestamp"];
+  check(historyKeys.every((key) => ui.dictionaries[NS].zh[key] && ui.dictionaries[NS].en[key]), "AI history labels exist in both languages");
 }
 
 // 6: a session that follows the default follows it live while both are mounted.

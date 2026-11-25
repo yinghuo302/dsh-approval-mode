@@ -16,7 +16,8 @@ An approval mode plugin for DSH. Adds an "approval mode" button next to the perm
 
 - The button sits in the composer toolbar next to the permission selector, styled like the permission control
 - **Default approval**: identical to stock DSH — tool calls require a click to approve
-- **AI approval**: the current default model reviews the full call only when DSH would otherwise ask for approval or Bash requests a strictly wider sandbox. It can decide whether to allow a justified `workspace-write` → `danger-full-access` escalation. A sandbox mode equal to or narrower than the current mode is not an escalation. Denial, uncertainty, malformed output, timeout, or model failure rejects the call directly. The review receives only this call, not the conversation history.
+- **AI approval**: the current default model reviews the full call only when DSH would otherwise ask for approval or Bash requests a strictly wider sandbox. A sandbox mode equal to or narrower than the current mode is not an escalation. Denial, uncertainty, malformed output, timeout, or model failure rejects the call directly.
+- **AI approval history**: choose this from the approval-mode menu to view recent decisions for the current session, including tool, time, decision, requested permission, and redacted arguments; up to 500 records are stored locally in `$DSH_HOME/approval-mode/ai-approval-history.json` with restricted file permissions. Common credential fields are redacted, but command arguments may still contain sensitive data.
 - **Tool auto-approval**: ordinary tool calls are auto-approved; widening the sandbox to write outside the workspace still prompts you
 - **Bypass approval**: every tool call is auto-approved, escalations included, with no prompt at all (high risk)
 - Changes apply immediately and persist per session
